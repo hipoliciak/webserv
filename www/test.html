@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Page - webserv</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🧪 Test Page</h1>
+            <p class="subtitle">Testing webserv functionality</p>
+        </header>
+        
+        <main>
+            <section class="info">
+                <h2>HTTP Methods Test</h2>
+                <div class="link-grid">
+                    <button onclick="testGET()" class="test-link">Test GET</button>
+                    <button onclick="testPOST()" class="test-link">Test POST</button>
+                    <button onclick="testDELETE()" class="test-link">Test DELETE</button>
+                </div>
+                
+                <div id="test-results" style="margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                    <h3>Test Results:</h3>
+                    <pre id="results-output">Click a button above to test HTTP methods...</pre>
+                </div>
+            </section>
+            
+            <section class="features">
+                <h2>Server Tests</h2>
+                <ul>
+                    <li id="test-static">📄 Static file serving</li>
+                    <li id="test-css">🎨 CSS file loading</li>
+                    <li id="test-js">⚡ JavaScript file loading</li>
+                    <li id="test-images">🖼️ Image file support</li>
+                </ul>
+            </section>
+            
+            <section class="links">
+                <h2>Navigation</h2>
+                <div class="link-grid">
+                    <a href="/" class="test-link">← Back to Home</a>
+                    <a href="/upload.html" class="test-link">Upload Test →</a>
+                </div>
+            </section>
+        </main>
+        
+        <footer>
+            <p>&copy; 2025 webserv project test page</p>
+        </footer>
+    </div>
+    
+    <script>
+        function testGET() {
+            fetch('/test.html')
+                .then(response => {
+                    document.getElementById('results-output').textContent = 
+                        `GET Request: ${response.status} ${response.statusText}\n` +
+                        `Headers: ${JSON.stringify([...response.headers.entries()], null, 2)}`;
+                })
+                .catch(error => {
+                    document.getElementById('results-output').textContent = 
+                        `GET Request failed: ${error.message}`;
+                });
+        }
+        
+        function testPOST() {
+            fetch('/test', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({test: 'data'})
+            })
+                .then(response => {
+                    document.getElementById('results-output').textContent = 
+                        `POST Request: ${response.status} ${response.statusText}\n` +
+                        `Headers: ${JSON.stringify([...response.headers.entries()], null, 2)}`;
+                })
+                .catch(error => {
+                    document.getElementById('results-output').textContent = 
+                        `POST Request failed: ${error.message}`;
+                });
+        }
+        
+        function testDELETE() {
+            fetch('/test', {
+                method: 'DELETE'
+            })
+                .then(response => {
+                    document.getElementById('results-output').textContent = 
+                        `DELETE Request: ${response.status} ${response.statusText}\n` +
+                        `Headers: ${JSON.stringify([...response.headers.entries()], null, 2)}`;
+                })
+                .catch(error => {
+                    document.getElementById('results-output').textContent = 
+                        `DELETE Request failed: ${error.message}`;
+                });
+        }
+        
+        // Mark tests as complete when resources load
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('test-static').innerHTML += ' ✅';
+            document.getElementById('test-css').innerHTML += ' ✅';
+            document.getElementById('test-js').innerHTML += ' ✅';
+        });
+    </script>
+</body>
+</html>
