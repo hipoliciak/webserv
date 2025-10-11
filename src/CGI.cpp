@@ -33,7 +33,6 @@ void CGI::setEnvironmentVariable(const std::string& key, const std::string& valu
 }
 
 void CGI::setupEnvironment(const HttpRequest& request, const std::string& serverName, int serverPort) {
-    // Required CGI environment variables according to RFC 3875
     _envVars["REQUEST_METHOD"] = request.getMethod();
     _envVars["REQUEST_URI"] = request.getUri();
     _envVars["QUERY_STRING"] = request.getUri().find('?') != std::string::npos ? 
@@ -48,7 +47,7 @@ void CGI::setupEnvironment(const HttpRequest& request, const std::string& server
     _envVars["SCRIPT_FILENAME"] = _scriptPath;
     _envVars["PATH_INFO"] = "";
     _envVars["PATH_TRANSLATED"] = "";
-    _envVars["REMOTE_ADDR"] = "127.0.0.1"; // TODO: Get actual client IP
+    _envVars["REMOTE_ADDR"] = "127.0.0.1";
     _envVars["REMOTE_HOST"] = "";
     _envVars["AUTH_TYPE"] = "";
     _envVars["REMOTE_USER"] = "";
@@ -113,10 +112,8 @@ std::string CGI::execute() {
     }
     
     if (pid == 0) {
-        // Child process
-        close(pipefd[0]); // Close read end
+        close(pipefd[0]);
         
-        // Redirect stdout to pipe
         if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
             Utils::logError("Failed to redirect stdout in CGI child");
             freeEnvArray(envArray);
@@ -124,23 +121,19 @@ std::string CGI::execute() {
         }
         close(pipefd[1]);
         
-        // Change directory to script directory
         if (chdir(_scriptDir.c_str()) == -1) {
             Utils::logError("Failed to change directory for CGI execution");
             freeEnvArray(envArray);
             exit(1);
         }
         
-        // Execute the script
         if (_interpreter.empty()) {
-            // Try to execute script directly
             char* args[] = { 
                 const_cast<char*>(_scriptPath.c_str()), 
                 NULL 
             };
             execve(_scriptPath.c_str(), args, envArray);
         } else {
-            // Use interpreter
             char* args[] = { 
                 const_cast<char*>(_interpreter.c_str()), 
                 const_cast<char*>(_scriptPath.c_str()), 
@@ -155,15 +148,11 @@ std::string CGI::execute() {
         exit(1);
     } else {
         // Parent process
-        close(pipefd[1]); // Close write end
+        close(pipefd[1]);
         
-        // Send body to CGI if needed (for POST requests)
         if (!_body.empty()) {
-            // We should use another pipe for stdin, but for simplicity we'll skip this for now
-            // TODO: Implement proper stdin handling for POST data
         }
         
-        // Read output from CGI
         std::string output;
         char buffer[BUFFER_SIZE];
         ssize_t bytesRead;
@@ -175,11 +164,9 @@ std::string CGI::execute() {
         
         close(pipefd[0]);
         
-        // Wait for child to finish
         int status;
         waitpid(pid, &status, 0);
         
-        // Free the environment array in parent process
         freeEnvArray(envArray);
         
         if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {

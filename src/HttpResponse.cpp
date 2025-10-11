@@ -131,18 +131,14 @@ HttpResponse HttpResponse::createFileResponse(const std::string& filePath) {
     HttpResponse response;
     
     if (!Utils::fileExists(filePath)) {
-        Utils::logDebug("File not found: " + filePath + ", returning 404");
         return createErrorResponse(404);
     }
     
     std::string content = Utils::readFile(filePath);
-    // Note: Empty file content is valid, don't treat as error
     
     std::string mimeType = getMimeType(filePath);
     response.setContentType(mimeType);
     response.setBody(content);
-    Utils::logDebug("File response created for: " + filePath + ", status: " + Utils::intToString(response.getStatusCode()) + 
-                   ", content length: " + Utils::sizeToString(content.size()));
     
     return response;
 }

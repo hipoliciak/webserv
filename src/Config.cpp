@@ -293,25 +293,14 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
     setLocationDefaults(bestMatch);
     size_t bestMatchLength = 0;
     
-    Utils::logDebug("Looking for location match for path: " + path);
-    
     for (size_t i = 0; i < server.locations.size(); ++i) {
         const LocationConfig& location = server.locations[i];
-        Utils::logDebug("Checking location: " + location.path + " (length: " + Utils::sizeToString(location.path.length()) + ")");
         if (Utils::startsWith(path, location.path) && location.path.length() > bestMatchLength) {
-            Utils::logDebug("Found better match: " + location.path);
             bestMatch = location;
             bestMatchLength = location.path.length();
         }
     }
     
-    if (bestMatchLength > 0) {
-        Utils::logDebug("Best location match: " + bestMatch.path + " for path: " + path);
-    } else {
-        Utils::logDebug("No location match found for path: " + path + ", using server defaults");
-    }
-    
-    // If no location matched, use server defaults
     if (bestMatchLength == 0) {
         bestMatch.root = server.root;
         bestMatch.index = server.index;
@@ -380,48 +369,6 @@ std::string Config::getCGIInterpreter(const std::string& extension, const Server
 
 bool Config::isCGIEnabled(const ServerConfig& server) const {
     return !server.cgiExtensions.empty();
-}
-
-void Config::print() const {
-    std::cout << "=== Configuration ===" << std::endl;
-    for (size_t i = 0; i < _servers.size(); ++i) {
-        const ServerConfig& server = _servers[i];
-        std::cout << "Server " << i + 1 << ":" << std::endl;
-        std::cout << "  Host: " << server.host << std::endl;
-        std::cout << "  Port: " << server.port << std::endl;
-        std::cout << "  Server Name: " << server.serverName << std::endl;
-        std::cout << "  Root: " << server.root << std::endl;
-        std::cout << "  Index: " << server.index << std::endl;
-        std::cout << "  Max Body Size: " << server.maxBodySize << std::endl;
-        std::cout << "  Auto Index: " << (server.autoIndex ? "on" : "off") << std::endl;
-        std::cout << "  Upload Path: " << server.uploadPath << std::endl;
-        std::cout << "  CGI Path: " << server.cgiPath << std::endl;
-        
-        std::cout << "  Allowed Methods: ";
-        for (size_t j = 0; j < server.allowedMethods.size(); ++j) {
-            std::cout << server.allowedMethods[j] << " ";
-        }
-        std::cout << std::endl;
-        
-        if (!server.errorPages.empty()) {
-            std::cout << "  Error Pages:" << std::endl;
-            for (std::map<int, std::string>::const_iterator it = server.errorPages.begin(); it != server.errorPages.end(); ++it) {
-                std::cout << "    " << it->first << ": " << it->second << std::endl;
-            }
-        }
-        
-        if (!server.locations.empty()) {
-            std::cout << "  Locations:" << std::endl;
-            for (size_t j = 0; j < server.locations.size(); ++j) {
-                const LocationConfig& location = server.locations[j];
-                std::cout << "    " << location.path << ":" << std::endl;
-                std::cout << "      Root: " << location.root << std::endl;
-                std::cout << "      Index: " << location.index << std::endl;
-                std::cout << "      Auto Index: " << (location.autoIndex ? "on" : "off") << std::endl;
-            }
-        }
-    }
-    std::cout << "====================" << std::endl;
 }
 
 std::vector<std::string> Config::split(const std::string& str, char delimiter) {

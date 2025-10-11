@@ -95,37 +95,40 @@ bool Server::listenSocket() {
 
 void Server::run() {
     _running = true;
-    Utils::logInfo("Server started successfully");
     
     while (_running) {
-        int pollResult = poll(&_pollFds[0], _pollFds.size(), 1000); // 1 second timeout
+        int pollResult = poll(&_pollFds[0], _pollFds.size(), 1000);
         
         if (pollResult < 0) {
-            if (errno == EINTR) continue; // Interrupted by signal
+            if (errno == EINTR) continue;
             Utils::logError("Poll failed: " + std::string(strerror(errno)));
             break;
         }
         
-        if (pollResult == 0) continue; // Timeout
+        if (pollResult == 0) continue;
         
-        // Check for new connections
         if (_pollFds[0].revents & POLLIN) {
             acceptNewConnection();
         }
         
-        // Check existing client connections
         for (size_t i = 1; i < _pollFds.size(); ++i) {
+            if (_pollFds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+                int socketError;
+                socklen_t len = sizeof(socketError);
+                if (getsockopt(_pollFds[i].fd, SOL_SOCKET, SO_ERROR, &socketError, &len) == 0 && socketError != 0) {
+                    Utils::logError("Socket error for fd " + Utils::intToString(_pollFds[i].fd) + ": " + std::string(strerror(socketError)));
+                }
+                removeClient(_pollFds[i].fd);
+                --i;
+                continue;
+            }
+            
             if (_pollFds[i].revents & POLLIN) {
                 handleClientRead(_pollFds[i].fd);
             }
             
             if (_pollFds[i].revents & POLLOUT) {
                 handleClientWrite(_pollFds[i].fd);
-            }
-            
-            if (_pollFds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) {
-                removeClient(_pollFds[i].fd);
-                --i; // Adjust index after removal
             }
         }
     }
@@ -138,13 +141,12 @@ bool Server::acceptNewConnection() {
     int clientFd = accept(_serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
     if (clientFd < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return true; // No pending connections
+            return true;
         }
         Utils::logError("Failed to accept connection: " + std::string(strerror(errno)));
         return false;
     }
     
-    // Set client socket to non-blocking
     int flags = fcntl(clientFd, F_GETFL, 0);
     if (fcntl(clientFd, F_SETFL, flags | O_NONBLOCK) < 0) {
         Utils::logError("Failed to set client socket non-blocking");
@@ -152,42 +154,47 @@ bool Server::acceptNewConnection() {
         return false;
     }
     
-    // Add client to poll list
+    int nodelay = 1;
+    if (setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) < 0) {
+        Utils::logError("Failed to set TCP_NODELAY (non-fatal): " + std::string(strerror(errno)));
+    }
+    
     struct pollfd clientPollFd;
     clientPollFd.fd = clientFd;
     clientPollFd.events = POLLIN;
+    clientPollFd.revents = 0;
     _pollFds.push_back(clientPollFd);
     
-    // Create client object
     _clients[clientFd] = Client(clientFd);
     
     std::string clientIP = Utils::getClientIP(clientFd);
-    Utils::logInfo("New connection accepted from " + clientIP);
     
     return true;
 }
 
 void Server::handleClientRead(int clientFd) {
     Client& client = _clients[clientFd];
-    Utils::logDebug("handleClientRead() for fd " + Utils::intToString(clientFd));
     
-    // If client is already stopped from reading, don't process further
-    if (client.shouldStopReading()) {
-        Utils::logDebug("Client already stopped reading, skipping handleClientRead");
-        return;
-    }
-    
-    if (!client.readData()) {
-        Utils::logDebug("readData() failed, removing client " + Utils::intToString(clientFd));
+    int socketError;
+    socklen_t len = sizeof(socketError);
+    if (getsockopt(clientFd, SOL_SOCKET, SO_ERROR, &socketError, &len) == 0 && socketError != 0) {
+        Utils::logError("Socket error detected before read: " + std::string(strerror(socketError)));
         removeClient(clientFd);
         return;
     }
     
-    // Check if headers just became complete and validate immediately
+    if (client.shouldStopReading()) {
+        return;
+    }
+    
+    if (!client.readData()) {
+        removeClient(clientFd);
+        return;
+    }
+    
     if (!client.isRequestComplete() && client.areHeadersComplete()) {
         std::string headers = client.getHeaders();
         
-        // Parse the request line to get method and URI
         size_t firstLineEnd = headers.find("\r\n");
         if (firstLineEnd == std::string::npos) {
             firstLineEnd = headers.find("\n");
@@ -201,16 +208,13 @@ void Server::handleClientRead(int clientFd) {
                 std::string method = tokens[0];
                 std::string uri = tokens[1];
                 
-                // Only validate body size for methods that can have bodies
                 if (method == "POST" || method == "PUT") {
-                    // Skip body size validation for .bla files (they should be handled by CGI)
                     std::string extension = Utils::getFileExtension(uri);
                     if (extension == ".bla") {
-                        Utils::logDebug("Skipping body size validation for .bla file: " + uri);
+                        // Skip body size validation for .bla files
                     } else {
                         const ServerConfig& serverConfig = _config.getDefaultServer();
                     
-                    // Check Content-Length header
                     size_t clPos = headers.find("Content-Length:");
                     if (clPos == std::string::npos) {
                         clPos = headers.find("content-length:");
@@ -229,17 +233,11 @@ void Server::handleClientRead(int clientFd) {
                                 lengthStr = Utils::trim(lengthStr);
                                 size_t contentLength = Utils::stringToInt(lengthStr);
                                 
-                                Utils::logDebug("Found Content-Length: " + Utils::sizeToString(contentLength) + 
-                                               ", Server limit: " + Utils::sizeToString(serverConfig.maxBodySize));
-                                
                                 if (contentLength > serverConfig.maxBodySize) {
                                     Utils::logError("Content-Length " + Utils::sizeToString(contentLength) + 
                                                    " exceeds server limit " + Utils::sizeToString(serverConfig.maxBodySize));
                                     
-                                    // Stop the client from reading more data immediately
                                     client.stopReading();
-                                    
-                                    // Send 413 Payload Too Large immediately
                                     HttpResponse response = HttpResponse::createErrorResponse(413);
                                     queueResponse(clientFd, response);
                                     return;
@@ -248,7 +246,6 @@ void Server::handleClientRead(int clientFd) {
                         }
                     }
                     
-                    // Check for chunked encoding - reject large chunked requests immediately
                     size_t tePos = headers.find("Transfer-Encoding:");
                     if (tePos == std::string::npos) {
                         tePos = headers.find("transfer-encoding:");
@@ -268,12 +265,8 @@ void Server::handleClientRead(int clientFd) {
                                 std::string teValueLow = Utils::toLower(teValue);
                                 
                                 if (teValueLow.find("chunked") != std::string::npos) {
-                                    Utils::logDebug("Detected chunked encoding - applying strict size limit");
-                                    
-                                    // For chunked requests, we'll apply a stricter buffer limit
-                                    // If we already have more than the allowed body size in buffer, reject
                                     size_t currentBufferSize = client.getBuffer().size();
-                                    if (currentBufferSize > serverConfig.maxBodySize + 1024) { // +1024 for headers
+                                    if (currentBufferSize > serverConfig.maxBodySize + 1024) {
                                         Utils::logError("Chunked request already exceeds buffer limit");
                                         client.stopReading();
                                         HttpResponse response = HttpResponse::createErrorResponse(413);
@@ -284,19 +277,15 @@ void Server::handleClientRead(int clientFd) {
                             }
                         }
                     }
-                    } // Close the else block for non-.bla files
+                    }
                 }
             }
         }
     }
     
     if (client.isRequestComplete()) {
-        Utils::logDebug("Request complete for fd " + Utils::intToString(clientFd) + ", processing...");
         processHttpRequest(clientFd, client.getRequest());
         client.clearRequest();
-        Utils::logDebug("Request processed and cleared for fd " + Utils::intToString(clientFd));
-    } else {
-        Utils::logDebug("Request not complete yet for fd " + Utils::intToString(clientFd));
     }
 }
 
@@ -307,35 +296,27 @@ void Server::handleClientWrite(int clientFd) {
 }
 
 void Server::processHttpRequest(int clientFd, const std::string& request) {
-    Utils::logDebug("processHttpRequest() for fd " + Utils::intToString(clientFd) + ", request size: " + Utils::sizeToString(request.size()));
     HttpRequest httpRequest(request);
     HttpResponse response;
     
     if (!httpRequest.isValid()) {
-        Utils::logDebug("HttpRequest is invalid, sending 400 error");
         response = HttpResponse::createErrorResponse(HTTP_BAD_REQUEST);
     } else {
-        Utils::logDebug("HttpRequest is valid - method: " + httpRequest.getMethod() + ", URI: " + httpRequest.getUri());
         ServerConfig serverConfig = getServerConfig(httpRequest);
         
         LocationConfig locationConfig = getMatchingLocation(httpRequest.getUri(), serverConfig);
         
-        // Special case: allow POST for .bla files regardless of location configuration
         bool isBlaFile = false;
         if (httpRequest.getMethod() == "POST") {
             std::string extension = Utils::getFileExtension(httpRequest.getUri());
             if (extension == ".bla") {
                 isBlaFile = true;
-                Utils::logDebug("Detected .bla file, allowing POST regardless of location config");
             }
         }
         
-        // Check if method is allowed for this location
         if (!isBlaFile && !isMethodAllowed(httpRequest.getMethod(), serverConfig, locationConfig)) {
-            Utils::logError("Method " + httpRequest.getMethod() + " not allowed for URI: " + httpRequest.getUri());
             response = HttpResponse::createErrorResponse(HTTP_METHOD_NOT_ALLOWED);
         } else {
-            // Handle different HTTP methods
             if (httpRequest.getMethod() == "GET") {
                 response = handleGETRequest(httpRequest, serverConfig);
             } else if (httpRequest.getMethod() == "POST") {
@@ -345,8 +326,6 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
             } else if (httpRequest.getMethod() == "DELETE") {
                 response = handleDELETERequest(httpRequest, serverConfig);
             } else {
-                // Any other method (including HEAD, etc.) is not allowed
-                Utils::logDebug("Method " + httpRequest.getMethod() + " not supported, returning 405");
                 response = HttpResponse::createErrorResponse(HTTP_METHOD_NOT_ALLOWED);
             }
         }
@@ -357,20 +336,10 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
 
 void Server::queueResponse(int clientFd, const HttpResponse& response) {
     std::string responseStr = response.toString();
-    Utils::logDebug("Queueing response for fd " + Utils::intToString(clientFd) + 
-                   ", status: " + Utils::intToString(response.getStatusCode()) + 
-                   ", size: " + Utils::sizeToString(responseStr.size()) + " bytes");
-    Utils::logDebug("Response first line: " + responseStr.substr(0, responseStr.find('\n')));
-    
-    // Log complete response for HEAD requests (they should be small)
-    if (responseStr.size() < 500) {
-        Utils::logDebug("Complete response: [" + responseStr + "]");
-    }
     
     _pendingWrites[clientFd] = responseStr;
     _writeOffsets[clientFd] = 0;
     
-    // Update poll events to include POLLOUT
     updatePollEvents(clientFd);
 }
 
@@ -395,13 +364,9 @@ bool Server::writeToClient(int clientFd) {
     _writeOffsets[clientFd] += bytesSent;
     
     if (_writeOffsets[clientFd] >= response.length()) {
-        // Response completely sent
         _pendingWrites.erase(clientFd);
         _writeOffsets.erase(clientFd);
         updatePollEvents(clientFd);
-        Utils::logInfo("Response sent (" + Utils::sizeToString(response.length()) + " bytes)");
-        
-        // Close connection after sending response (HTTP/1.0 behavior)
         return false;
     }
     
@@ -421,29 +386,23 @@ void Server::updatePollEvents(int clientFd) {
 }
 
 void Server::removeClient(int clientFd) {
-    // Remove from poll list
     for (std::vector<struct pollfd>::iterator it = _pollFds.begin(); it != _pollFds.end(); ++it) {
         if (it->fd == clientFd) {
             _pollFds.erase(it);
             break;
         }
     }
-    
-    // Remove from clients map and pending writes
+
     _clients.erase(clientFd);
     _pendingWrites.erase(clientFd);
     _writeOffsets.erase(clientFd);
-    
-    // Close socket
+
     close(clientFd);
-    
-    Utils::logInfo("Client disconnected (fd: " + Utils::intToString(clientFd) + ")");
 }
 
 void Server::stop() {
     _running = false;
-    
-    // Close all client connections
+
     for (std::map<int, Client>::iterator it = _clients.begin(); it != _clients.end(); ++it) {
         close(it->first);
     }
@@ -452,23 +411,15 @@ void Server::stop() {
     _pendingWrites.clear();
     _writeOffsets.clear();
     
-    // Close server socket
     if (_serverSocket >= 0) {
         close(_serverSocket);
         _serverSocket = -1;
     }
-    
-    Utils::logInfo("Server stopped");
 }
 
-// Placeholder implementations for new methods
 HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerConfig& serverConfig) {
     std::string filePath = resolveFilePath(request.getUri(), serverConfig);
     
-    Utils::logDebug("GET request for URI: " + request.getUri() + " resolved to: " + filePath);
-    Utils::logDebug("File exists: " + std::string(Utils::fileExists(filePath) ? "yes" : "no"));
-    
-    // Check if it's a CGI request
     std::string extension = Utils::getFileExtension(filePath);
     if (extension == ".php" || extension == ".py" || extension == ".sh") {
         if (Utils::fileExists(filePath)) {
@@ -478,7 +429,6 @@ HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerCo
         }
     }
     
-    // Check if file exists
     if (Utils::fileExists(filePath)) {
         if (Utils::isDirectory(filePath)) {
             return handleDirectoryRequest(filePath, request.getUri(), serverConfig);
@@ -578,34 +528,25 @@ HttpResponse Server::serveStaticFile(const std::string& path, const ServerConfig
 }
 
 HttpResponse Server::handleDirectoryRequest(const std::string& path, const std::string& uri, const ServerConfig& serverConfig) {
-    // Try to serve index file first
     std::string indexPath = path + "/" + serverConfig.index;
     if (Utils::fileExists(indexPath) && !Utils::isDirectory(indexPath)) {
         return serveStaticFile(indexPath, serverConfig);
     }
     
-    // Check if directory listing is enabled for this location
     LocationConfig location = getMatchingLocation(uri, serverConfig);
-    Utils::logDebug("Directory listing check - uri: " + uri + ", path: " + path + ", autoIndex: " + (location.autoIndex ? "true" : "false"));
     
-    // Special handling for /directory location: try to serve youpi.bad_extension file from subdirectories
     if (uri.find("/directory/") == 0 && uri != "/directory") {
         std::string youpiPath = path + "/youpi.bad_extension";
-        Utils::logDebug("Checking for youpi.bad_extension file: " + youpiPath);
         if (Utils::fileExists(youpiPath) && !Utils::isDirectory(youpiPath)) {
-            Utils::logDebug("Found youpi.bad_extension, serving it");
             return serveStaticFile(youpiPath, serverConfig);
         }
-        Utils::logDebug("No youpi.bad_extension found, returning 404");
         return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
     }
     
     if (!location.autoIndex) {
-        Utils::logDebug("Directory listing disabled, returning 403");
         return HttpResponse::createErrorResponse(HTTP_FORBIDDEN);
     }
     
-    // Generate directory listing
     std::string urlPath = uri;
     if (urlPath.find(serverConfig.root) == 0) {
         urlPath = urlPath.substr(serverConfig.root.length());
@@ -770,22 +711,18 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         setenv("SERVER_PORT", Utils::intToString(serverConfig.port).c_str(), 1);
         setenv("SERVER_PROTOCOL", "HTTP/1.1", 1);
         
-        // Change to script directory
         std::string scriptDir = Utils::getDirectory(scriptPath);
         std::string scriptName = Utils::getBasename(scriptPath);
         if (!scriptDir.empty()) {
             chdir(scriptDir.c_str());
         }
         
-        // Execute CGI script
-        Utils::logDebug("Executing CGI script: " + interpreter + " " + scriptName + " in directory: " + scriptDir);
         if (extension == ".php") {
             execl(interpreter.c_str(), interpreter.c_str(), scriptName.c_str(), NULL);
         } else {
             execl(interpreter.c_str(), interpreter.c_str(), scriptName.c_str(), NULL);
         }
         
-        // If we reach here, exec failed
         Utils::logError("exec failed: " + std::string(strerror(errno)));
         exit(1);
     } else {
@@ -989,42 +926,29 @@ bool Server::saveUploadedFile(const std::string& filename, const std::string& co
 std::string Server::resolveFilePath(const std::string& uri, const ServerConfig& serverConfig) {
     std::string path = uri;
     
-    // Remove query string if present
     size_t queryPos = path.find('?');
     if (queryPos != std::string::npos) {
         path = path.substr(0, queryPos);
     }
     
-    // Get matching location configuration
     LocationConfig location = getMatchingLocation(path, serverConfig);
     
-    // Use location root if specified, otherwise server root
     std::string root = location.root.empty() ? serverConfig.root : location.root;
     
-    // Handle root path
     if (path == "/") {
         std::string index = location.index.empty() ? serverConfig.index : location.index;
-        std::string resolvedPath = root + "/" + index;
-        Utils::logDebug("Root path resolution: " + uri + " -> " + resolvedPath);
-        return resolvedPath;
+        return root + "/" + index;
     }
     
-    // Handle location path mapping
     if (!location.path.empty() && path.find(location.path) == 0) {
-        // Strip location path and map to location root
         std::string remainingPath = path.substr(location.path.length());
         if (remainingPath.empty() || remainingPath[0] != '/') {
             remainingPath = "/" + remainingPath;
         }
-        std::string resolvedPath = root + remainingPath;
-        Utils::logDebug("Location path resolution: " + uri + " -> " + resolvedPath);
-        return resolvedPath;
+        return root + remainingPath;
     }
     
-    // Default mapping
-    std::string resolvedPath = root + path;
-    Utils::logDebug("Default path resolution: " + uri + " -> " + resolvedPath);
-    return resolvedPath;
+    return root + path;
 }
 
 LocationConfig Server::getMatchingLocation(const std::string& uri, const ServerConfig& serverConfig) {

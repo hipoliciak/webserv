@@ -31,6 +31,15 @@ SOURCES = main.cpp \
           CGI.cpp \
           Utils.cpp
 
+# Colors for output
+RED = \033[0;31m
+GREEN = \033[0;32m
+YELLOW = \033[0;33m
+BLUE = \033[0;34m
+MAGENTA = \033[0;35m
+CYAN = \033[0;36m
+NC = \033[0m # No Color
+
 # Object files
 OBJECTS = $(SOURCES:%.cpp=$(OBJDIR)/%.o)
 
@@ -46,11 +55,12 @@ all: $(NAME)
 # Main target
 $(NAME): $(OBJECTS)
 	@$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(NAME)
-	@echo "✓ $(NAME) created successfully!"
+	@echo "$(GREEN)✓ $(NAME) created successfully!$(NC)"
 
 # Object files compilation
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	@mkdir -p $(OBJDIR)
+	@echo "$(YELLOW)Compiling $<...$(NC)"
 	@$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 # Include dependency files
@@ -58,10 +68,12 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 
 # Clean object files
 clean:
+	@echo "$(RED)Cleaning object files...$(NC)"
 	@rm -rf $(OBJDIR)
 
 # Clean everything
 fclean: clean
+	@echo "$(RED)Cleaning $(NAME)...$(NC)"
 	@rm -f $(NAME)
 
 # Rebuild everything

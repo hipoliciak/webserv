@@ -14,8 +14,8 @@ private:
     struct sockaddr_in _serverAddr;
     std::vector<struct pollfd> _pollFds;
     std::map<int, Client> _clients;
-    std::map<int, std::string> _pendingWrites; // fd -> response data to write
-    std::map<int, size_t> _writeOffsets; // fd -> offset in pending write data
+    std::map<int, std::string> _pendingWrites;
+    std::map<int, size_t> _writeOffsets;
     Config _config;
     bool _running;
 

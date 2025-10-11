@@ -142,24 +142,3 @@ size_t HttpRequest::getContentLength() const {
     std::string contentLength = getHeader("content-length");
     return contentLength.empty() ? 0 : Utils::stringToInt(contentLength);
 }
-
-void HttpRequest::print() const {
-    std::cout << "=== HTTP Request ===" << std::endl;
-    std::cout << "Method: " << _method << std::endl;
-    std::cout << "URI: " << _uri << std::endl;
-    std::cout << "Version: " << _version << std::endl;
-    std::cout << "Headers:" << std::endl;
-    for (std::map<std::string, std::string>::const_iterator it = _headers.begin(); it != _headers.end(); ++it) {
-        std::cout << "  " << it->first << ": " << it->second << std::endl;
-    }
-    if (!_queryParams.empty()) {
-        std::cout << "Query Parameters:" << std::endl;
-        for (std::map<std::string, std::string>::const_iterator it = _queryParams.begin(); it != _queryParams.end(); ++it) {
-            std::cout << "  " << it->first << "=" << it->second << std::endl;
-        }
-    }
-    if (!_body.empty()) {
-        std::cout << "Body: " << _body << std::endl;
-    }
-    std::cout << "===================" << std::endl;
-}

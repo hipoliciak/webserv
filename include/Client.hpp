@@ -10,7 +10,7 @@ private:
     std::string _request;
     bool _requestComplete;
     time_t _lastActivity;
-    bool _stopReading; // Flag to prevent further reading
+    bool _stopReading;
 
 public:
     Client();
