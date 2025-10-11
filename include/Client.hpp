@@ -10,6 +10,7 @@ private:
     std::string _request;
     bool _requestComplete;
     time_t _lastActivity;
+    bool _stopReading; // Flag to prevent further reading
 
 public:
     Client();
@@ -21,6 +22,12 @@ public:
     void appendToBuffer(const std::string& data);
     bool isRequestComplete() const;
     void clearRequest();
+    
+    // Reading control
+    void stopReading();
+    bool shouldStopReading() const;
+    bool areHeadersComplete() const;
+    std::string getHeaders() const;
     
     // Getters/Setters
     int getFd() const;

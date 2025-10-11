@@ -293,12 +293,22 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
     setLocationDefaults(bestMatch);
     size_t bestMatchLength = 0;
     
+    Utils::logDebug("Looking for location match for path: " + path);
+    
     for (size_t i = 0; i < server.locations.size(); ++i) {
         const LocationConfig& location = server.locations[i];
+        Utils::logDebug("Checking location: " + location.path + " (length: " + Utils::sizeToString(location.path.length()) + ")");
         if (Utils::startsWith(path, location.path) && location.path.length() > bestMatchLength) {
+            Utils::logDebug("Found better match: " + location.path);
             bestMatch = location;
             bestMatchLength = location.path.length();
         }
+    }
+    
+    if (bestMatchLength > 0) {
+        Utils::logDebug("Best location match: " + bestMatch.path + " for path: " + path);
+    } else {
+        Utils::logDebug("No location match found for path: " + path + ", using server defaults");
     }
     
     // If no location matched, use server defaults

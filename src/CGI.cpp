@@ -100,11 +100,15 @@ std::string CGI::execute() {
         return "";
     }
     
+    // Set up environment before forking
+    char** envArray = createEnvArray();
+    
     pid_t pid = fork();
     if (pid == -1) {
         Utils::logError("Failed to fork for CGI execution");
         close(pipefd[0]);
         close(pipefd[1]);
+        freeEnvArray(envArray);
         return "";
     }
     
@@ -115,6 +119,7 @@ std::string CGI::execute() {
         // Redirect stdout to pipe
         if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
             Utils::logError("Failed to redirect stdout in CGI child");
+            freeEnvArray(envArray);
             exit(1);
         }
         close(pipefd[1]);
@@ -122,11 +127,9 @@ std::string CGI::execute() {
         // Change directory to script directory
         if (chdir(_scriptDir.c_str()) == -1) {
             Utils::logError("Failed to change directory for CGI execution");
+            freeEnvArray(envArray);
             exit(1);
         }
-        
-        // Set up environment
-        char** envArray = createEnvArray();
         
         // Execute the script
         if (_interpreter.empty()) {
@@ -175,6 +178,9 @@ std::string CGI::execute() {
         // Wait for child to finish
         int status;
         waitpid(pid, &status, 0);
+        
+        // Free the environment array in parent process
+        freeEnvArray(envArray);
         
         if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
             Utils::logInfo("CGI script executed successfully");

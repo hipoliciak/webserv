@@ -43,11 +43,12 @@ public:
     void queueResponse(int clientFd, const HttpResponse& response);
     HttpResponse handleGETRequest(const HttpRequest& request, const ServerConfig& serverConfig);
     HttpResponse handlePOSTRequest(const HttpRequest& request, const ServerConfig& serverConfig);
+    HttpResponse handlePUTRequest(const HttpRequest& request, const ServerConfig& serverConfig);
     HttpResponse handleDELETERequest(const HttpRequest& request, const ServerConfig& serverConfig);
     
     // File operations
     HttpResponse serveStaticFile(const std::string& path, const ServerConfig& serverConfig);
-    HttpResponse handleDirectoryRequest(const std::string& path, const ServerConfig& serverConfig);
+    HttpResponse handleDirectoryRequest(const std::string& path, const std::string& uri, const ServerConfig& serverConfig);
     HttpResponse generateDirectoryListing(const std::string& path, const std::string& urlPath);
     
     // CGI handling

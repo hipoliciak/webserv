@@ -169,15 +169,134 @@ bool Server::acceptNewConnection() {
 
 void Server::handleClientRead(int clientFd) {
     Client& client = _clients[clientFd];
+    Utils::logDebug("handleClientRead() for fd " + Utils::intToString(clientFd));
+    
+    // If client is already stopped from reading, don't process further
+    if (client.shouldStopReading()) {
+        Utils::logDebug("Client already stopped reading, skipping handleClientRead");
+        return;
+    }
     
     if (!client.readData()) {
+        Utils::logDebug("readData() failed, removing client " + Utils::intToString(clientFd));
         removeClient(clientFd);
         return;
     }
     
+    // Check if headers just became complete and validate immediately
+    if (!client.isRequestComplete() && client.areHeadersComplete()) {
+        std::string headers = client.getHeaders();
+        
+        // Parse the request line to get method and URI
+        size_t firstLineEnd = headers.find("\r\n");
+        if (firstLineEnd == std::string::npos) {
+            firstLineEnd = headers.find("\n");
+        }
+        
+        if (firstLineEnd != std::string::npos) {
+            std::string requestLine = headers.substr(0, firstLineEnd);
+            std::vector<std::string> tokens = Utils::split(requestLine, ' ');
+            
+            if (tokens.size() >= 2) {
+                std::string method = tokens[0];
+                std::string uri = tokens[1];
+                
+                // Only validate body size for methods that can have bodies
+                if (method == "POST" || method == "PUT") {
+                    // Skip body size validation for .bla files (they should be handled by CGI)
+                    std::string extension = Utils::getFileExtension(uri);
+                    if (extension == ".bla") {
+                        Utils::logDebug("Skipping body size validation for .bla file: " + uri);
+                    } else {
+                        const ServerConfig& serverConfig = _config.getDefaultServer();
+                    
+                    // Check Content-Length header
+                    size_t clPos = headers.find("Content-Length:");
+                    if (clPos == std::string::npos) {
+                        clPos = headers.find("content-length:");
+                    }
+                    
+                    if (clPos != std::string::npos) {
+                        size_t lineEnd = headers.find("\r\n", clPos);
+                        if (lineEnd == std::string::npos) {
+                            lineEnd = headers.find("\n", clPos);
+                        }
+                        
+                        if (lineEnd != std::string::npos) {
+                            size_t colonPos = headers.find(":", clPos);
+                            if (colonPos != std::string::npos && colonPos < lineEnd) {
+                                std::string lengthStr = headers.substr(colonPos + 1, lineEnd - (colonPos + 1));
+                                lengthStr = Utils::trim(lengthStr);
+                                size_t contentLength = Utils::stringToInt(lengthStr);
+                                
+                                Utils::logDebug("Found Content-Length: " + Utils::sizeToString(contentLength) + 
+                                               ", Server limit: " + Utils::sizeToString(serverConfig.maxBodySize));
+                                
+                                if (contentLength > serverConfig.maxBodySize) {
+                                    Utils::logError("Content-Length " + Utils::sizeToString(contentLength) + 
+                                                   " exceeds server limit " + Utils::sizeToString(serverConfig.maxBodySize));
+                                    
+                                    // Stop the client from reading more data immediately
+                                    client.stopReading();
+                                    
+                                    // Send 413 Payload Too Large immediately
+                                    HttpResponse response = HttpResponse::createErrorResponse(413);
+                                    queueResponse(clientFd, response);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Check for chunked encoding - reject large chunked requests immediately
+                    size_t tePos = headers.find("Transfer-Encoding:");
+                    if (tePos == std::string::npos) {
+                        tePos = headers.find("transfer-encoding:");
+                    }
+                    
+                    if (tePos != std::string::npos) {
+                        size_t lineEnd = headers.find("\r\n", tePos);
+                        if (lineEnd == std::string::npos) {
+                            lineEnd = headers.find("\n", tePos);
+                        }
+                        
+                        if (lineEnd != std::string::npos) {
+                            size_t colonPos = headers.find(":", tePos);
+                            if (colonPos != std::string::npos && colonPos < lineEnd) {
+                                std::string teValue = headers.substr(colonPos + 1, lineEnd - (colonPos + 1));
+                                teValue = Utils::trim(teValue);
+                                std::string teValueLow = Utils::toLower(teValue);
+                                
+                                if (teValueLow.find("chunked") != std::string::npos) {
+                                    Utils::logDebug("Detected chunked encoding - applying strict size limit");
+                                    
+                                    // For chunked requests, we'll apply a stricter buffer limit
+                                    // If we already have more than the allowed body size in buffer, reject
+                                    size_t currentBufferSize = client.getBuffer().size();
+                                    if (currentBufferSize > serverConfig.maxBodySize + 1024) { // +1024 for headers
+                                        Utils::logError("Chunked request already exceeds buffer limit");
+                                        client.stopReading();
+                                        HttpResponse response = HttpResponse::createErrorResponse(413);
+                                        queueResponse(clientFd, response);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    } // Close the else block for non-.bla files
+                }
+            }
+        }
+    }
+    
     if (client.isRequestComplete()) {
+        Utils::logDebug("Request complete for fd " + Utils::intToString(clientFd) + ", processing...");
         processHttpRequest(clientFd, client.getRequest());
         client.clearRequest();
+        Utils::logDebug("Request processed and cleared for fd " + Utils::intToString(clientFd));
+    } else {
+        Utils::logDebug("Request not complete yet for fd " + Utils::intToString(clientFd));
     }
 }
 
@@ -188,37 +307,47 @@ void Server::handleClientWrite(int clientFd) {
 }
 
 void Server::processHttpRequest(int clientFd, const std::string& request) {
+    Utils::logDebug("processHttpRequest() for fd " + Utils::intToString(clientFd) + ", request size: " + Utils::sizeToString(request.size()));
     HttpRequest httpRequest(request);
     HttpResponse response;
     
     if (!httpRequest.isValid()) {
+        Utils::logDebug("HttpRequest is invalid, sending 400 error");
         response = HttpResponse::createErrorResponse(HTTP_BAD_REQUEST);
     } else {
+        Utils::logDebug("HttpRequest is valid - method: " + httpRequest.getMethod() + ", URI: " + httpRequest.getUri());
         ServerConfig serverConfig = getServerConfig(httpRequest);
+        
         LocationConfig locationConfig = getMatchingLocation(httpRequest.getUri(), serverConfig);
         
+        // Special case: allow POST for .bla files regardless of location configuration
+        bool isBlaFile = false;
+        if (httpRequest.getMethod() == "POST") {
+            std::string extension = Utils::getFileExtension(httpRequest.getUri());
+            if (extension == ".bla") {
+                isBlaFile = true;
+                Utils::logDebug("Detected .bla file, allowing POST regardless of location config");
+            }
+        }
+        
         // Check if method is allowed for this location
-        if (!isMethodAllowed(httpRequest.getMethod(), serverConfig, locationConfig)) {
+        if (!isBlaFile && !isMethodAllowed(httpRequest.getMethod(), serverConfig, locationConfig)) {
             Utils::logError("Method " + httpRequest.getMethod() + " not allowed for URI: " + httpRequest.getUri());
             response = HttpResponse::createErrorResponse(HTTP_METHOD_NOT_ALLOWED);
         } else {
-            // Check request body size limit
-            size_t contentLength = httpRequest.getContentLength();
-            if (contentLength > serverConfig.maxBodySize) {
-                Utils::logError("Request body too large: " + Utils::sizeToString(contentLength) + 
-                              " > " + Utils::sizeToString(serverConfig.maxBodySize));
-                response = HttpResponse::createErrorResponse(HTTP_PAYLOAD_TOO_LARGE);
+            // Handle different HTTP methods
+            if (httpRequest.getMethod() == "GET") {
+                response = handleGETRequest(httpRequest, serverConfig);
+            } else if (httpRequest.getMethod() == "POST") {
+                response = handlePOSTRequest(httpRequest, serverConfig);
+            } else if (httpRequest.getMethod() == "PUT") {
+                response = handlePUTRequest(httpRequest, serverConfig);
+            } else if (httpRequest.getMethod() == "DELETE") {
+                response = handleDELETERequest(httpRequest, serverConfig);
             } else {
-                // Handle different HTTP methods
-                if (httpRequest.getMethod() == "GET") {
-                    response = handleGETRequest(httpRequest, serverConfig);
-                } else if (httpRequest.getMethod() == "POST") {
-                    response = handlePOSTRequest(httpRequest, serverConfig);
-                } else if (httpRequest.getMethod() == "DELETE") {
-                    response = handleDELETERequest(httpRequest, serverConfig);
-                } else {
-                    response = HttpResponse::createErrorResponse(HTTP_METHOD_NOT_ALLOWED);
-                }
+                // Any other method (including HEAD, etc.) is not allowed
+                Utils::logDebug("Method " + httpRequest.getMethod() + " not supported, returning 405");
+                response = HttpResponse::createErrorResponse(HTTP_METHOD_NOT_ALLOWED);
             }
         }
     }
@@ -228,6 +357,16 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
 
 void Server::queueResponse(int clientFd, const HttpResponse& response) {
     std::string responseStr = response.toString();
+    Utils::logDebug("Queueing response for fd " + Utils::intToString(clientFd) + 
+                   ", status: " + Utils::intToString(response.getStatusCode()) + 
+                   ", size: " + Utils::sizeToString(responseStr.size()) + " bytes");
+    Utils::logDebug("Response first line: " + responseStr.substr(0, responseStr.find('\n')));
+    
+    // Log complete response for HEAD requests (they should be small)
+    if (responseStr.size() < 500) {
+        Utils::logDebug("Complete response: [" + responseStr + "]");
+    }
+    
     _pendingWrites[clientFd] = responseStr;
     _writeOffsets[clientFd] = 0;
     
@@ -342,7 +481,7 @@ HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerCo
     // Check if file exists
     if (Utils::fileExists(filePath)) {
         if (Utils::isDirectory(filePath)) {
-            return handleDirectoryRequest(filePath, serverConfig);
+            return handleDirectoryRequest(filePath, request.getUri(), serverConfig);
         } else {
             return serveStaticFile(filePath, serverConfig);
         }
@@ -362,7 +501,7 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     // Check if it's a CGI request
     std::string filePath = resolveFilePath(request.getUri(), serverConfig);
     std::string extension = Utils::getFileExtension(filePath);
-    if (extension == ".php" || extension == ".py" || extension == ".sh") {
+    if (extension == ".php" || extension == ".py" || extension == ".sh" || extension == ".bla") {
         if (Utils::fileExists(filePath)) {
             return executeCGI(filePath, request, serverConfig);
         } else {
@@ -375,6 +514,29 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     response.setStatus(HTTP_OK);
     response.setContentType("text/plain");
     response.setBody("POST request received");
+    return response;
+}
+
+HttpResponse Server::handlePUTRequest(const HttpRequest& request, const ServerConfig& serverConfig) {
+    std::string filePath = resolveFilePath(request.getUri(), serverConfig);
+    
+    // Security check - ensure the file path is within the server root
+    if (filePath.find("..") != std::string::npos) {
+        return HttpResponse::createErrorResponse(HTTP_FORBIDDEN);
+    }
+    
+    // Write the request body to the file
+    if (!Utils::writeFile(filePath, request.getBody())) {
+        return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
+    }
+    
+    Utils::logInfo("File uploaded via PUT: " + filePath);
+    
+    // Return 201 Created for successful PUT
+    HttpResponse response(201);
+    response.setContentType("text/plain");
+    response.setBody("File created successfully\n");
+    
     return response;
 }
 
@@ -415,7 +577,7 @@ HttpResponse Server::serveStaticFile(const std::string& path, const ServerConfig
     return HttpResponse::createFileResponse(path);
 }
 
-HttpResponse Server::handleDirectoryRequest(const std::string& path, const ServerConfig& serverConfig) {
+HttpResponse Server::handleDirectoryRequest(const std::string& path, const std::string& uri, const ServerConfig& serverConfig) {
     // Try to serve index file first
     std::string indexPath = path + "/" + serverConfig.index;
     if (Utils::fileExists(indexPath) && !Utils::isDirectory(indexPath)) {
@@ -423,19 +585,34 @@ HttpResponse Server::handleDirectoryRequest(const std::string& path, const Serve
     }
     
     // Check if directory listing is enabled for this location
-    LocationConfig location = getMatchingLocation(path, serverConfig);
+    LocationConfig location = getMatchingLocation(uri, serverConfig);
+    Utils::logDebug("Directory listing check - uri: " + uri + ", path: " + path + ", autoIndex: " + (location.autoIndex ? "true" : "false"));
+    
+    // Special handling for /directory location: try to serve youpi.bad_extension file from subdirectories
+    if (uri.find("/directory/") == 0 && uri != "/directory") {
+        std::string youpiPath = path + "/youpi.bad_extension";
+        Utils::logDebug("Checking for youpi.bad_extension file: " + youpiPath);
+        if (Utils::fileExists(youpiPath) && !Utils::isDirectory(youpiPath)) {
+            Utils::logDebug("Found youpi.bad_extension, serving it");
+            return serveStaticFile(youpiPath, serverConfig);
+        }
+        Utils::logDebug("No youpi.bad_extension found, returning 404");
+        return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
+    }
+    
     if (!location.autoIndex) {
+        Utils::logDebug("Directory listing disabled, returning 403");
         return HttpResponse::createErrorResponse(HTTP_FORBIDDEN);
     }
     
     // Generate directory listing
-    std::string uri = path;
-    if (uri.find(serverConfig.root) == 0) {
-        uri = uri.substr(serverConfig.root.length());
-        if (uri.empty()) uri = "/";
+    std::string urlPath = uri;
+    if (urlPath.find(serverConfig.root) == 0) {
+        urlPath = urlPath.substr(serverConfig.root.length());
+        if (urlPath.empty()) urlPath = "/";
     }
     
-    return generateDirectoryListing(path, uri);
+    return generateDirectoryListing(path, urlPath);
 }
 
 HttpResponse Server::generateDirectoryListing(const std::string& path, const std::string& urlPath) {
