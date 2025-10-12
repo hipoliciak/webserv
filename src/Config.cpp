@@ -303,6 +303,7 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
     LocationConfig bestMatch;
     setLocationDefaults(bestMatch);
     size_t bestMatchLength = 0;
+    LocationConfig regexMatch;
     bool foundRegexMatch = false;
     
     for (size_t i = 0; i < server.locations.size(); ++i) {
@@ -317,20 +318,26 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
             }
             // Could add more regex patterns here as needed
             
-            // Regex matches have highest priority
-            if (matches) {
-                bestMatch = location;
+            // Store regex match but don't immediately use it
+            if (matches && !foundRegexMatch) {
+                regexMatch = location;
                 foundRegexMatch = true;
-                break; // First regex match wins
             }
-        } else if (!foundRegexMatch) {
-            // Regular prefix matching (only if no regex match found)
+        } else {
+            // Regular prefix matching
             matches = Utils::startsWith(path, location.path);
             if (matches && location.path.length() > bestMatchLength) {
                 bestMatch = location;
                 bestMatchLength = location.path.length();
             }
         }
+    }
+    
+    // Use prefix match if found, otherwise use regex match
+    if (bestMatchLength > 0) {
+        return bestMatch;
+    } else if (foundRegexMatch) {
+        return regexMatch;
     }
     
     if (bestMatchLength == 0 && !foundRegexMatch) {
