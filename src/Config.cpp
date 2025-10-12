@@ -156,8 +156,24 @@ bool Config::parseServerBlock(const std::string& block) {
             if (!indexValues.empty()) {
                 config.index = indexValues[0];
             }
-        } else if (directive == "max_body_size") {
-            config.maxBodySize = Utils::stringToInt(tokens[1]);
+        } else if (directive == "max_body_size" || directive == "client_max_body_size") {
+            std::string valueStr = tokens[1];
+            // Handle size suffixes (M, K, G)
+            size_t multiplier = 1;
+            if (!valueStr.empty()) {
+                char lastChar = valueStr[valueStr.length() - 1];
+                if (lastChar == 'M' || lastChar == 'm') {
+                    multiplier = 1024 * 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                } else if (lastChar == 'K' || lastChar == 'k') {
+                    multiplier = 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                } else if (lastChar == 'G' || lastChar == 'g') {
+                    multiplier = 1024 * 1024 * 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                }
+            }
+            config.maxBodySize = Utils::stringToInt(valueStr) * multiplier;
         } else if (directive == "autoindex") {
             config.autoIndex = (tokens[1] == "on");
         } else if (directive == "upload_path") {
@@ -209,8 +225,10 @@ bool Config::parseLocationBlock(const std::string& block, LocationConfig& locati
             location.uploadPath = extractValue(trimmedLine);
         } else if (directive == "cgi_path") {
             location.cgiPath = extractValue(trimmedLine);
-        } else if (directive == "cgi_extension") {
+        } else if (directive == "cgi_extension" || directive == "cgi_extensions") {
             location.cgiExtension = extractValue(trimmedLine);
+        } else if (directive == "default") {
+            location.index = extractValue(trimmedLine);
         } else if (directive == "allow_methods") {
             location.allowedMethods = extractValues(trimmedLine);
         } else if (directive == "redirect") {

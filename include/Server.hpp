@@ -10,12 +10,19 @@
 
 class Server {
 private:
-    int _serverSocket;
-    struct sockaddr_in _serverAddr;
+    struct ServerInfo {
+        int socket;
+        struct sockaddr_in addr;
+        ServerConfig config;
+    };
+    
+    std::vector<ServerInfo> _servers;
     std::vector<struct pollfd> _pollFds;
     std::map<int, Client> _clients;
     std::map<int, std::string> _pendingWrites;
     std::map<int, size_t> _writeOffsets;
+    std::map<int, ServerConfig> _serverConfigs; // Map socket fd to server config
+    std::map<int, int> _clientServerSockets; // Map client fd to server socket fd
     Config _config;
     bool _running;
 
@@ -30,10 +37,10 @@ public:
     void stop();
     
     // Socket operations
-    bool createSocket();
-    bool bindSocket();
-    bool listenSocket();
-    bool acceptNewConnection();
+    bool createSockets();
+    bool bindSockets();
+    bool listenSockets();
+    bool acceptNewConnection(int serverSocket);
     void handleClientRead(int clientFd);
     void handleClientWrite(int clientFd);
     void removeClient(int clientFd);
@@ -74,7 +81,7 @@ public:
 private:
     void updatePollEvents(int clientFd);
     bool writeToClient(int clientFd);
-    ServerConfig getServerConfig(const HttpRequest& request) const;
+    ServerConfig getServerConfig(int clientFd) const;
 };
 
 #endif

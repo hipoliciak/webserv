@@ -2,11 +2,11 @@
 #include "../include/Utils.hpp"
 #include "../include/CGI.hpp"
 
-Server::Server() : _serverSocket(-1), _running(false) {
+Server::Server() : _running(false) {
     _config = Config();
 }
 
-Server::Server(const Config& config) : _serverSocket(-1), _config(config), _running(false) {
+Server::Server(const Config& config) : _config(config), _running(false) {
 }
 
 Server::~Server() {
@@ -14,81 +14,103 @@ Server::~Server() {
 }
 
 bool Server::initialize() {
-    if (!createSocket()) {
+    if (!createSockets()) {
         return false;
     }
     
-    if (!bindSocket()) {
-        close(_serverSocket);
+    if (!bindSockets()) {
         return false;
     }
     
-    if (!listenSocket()) {
-        close(_serverSocket);
+    if (!listenSockets()) {
         return false;
     }
     
-    // Add server socket to poll list
-    struct pollfd serverPollFd;
-    serverPollFd.fd = _serverSocket;
-    serverPollFd.events = POLLIN;
-    _pollFds.push_back(serverPollFd);
-    
-    return true;
-}
-
-bool Server::createSocket() {
-    _serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (_serverSocket < 0) {
-        Utils::logError("Failed to create socket: " + std::string(strerror(errno)));
-        return false;
-    }
-    
-    // Set socket options
-    int opt = 1;
-    if (setsockopt(_serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        Utils::logError("Failed to set socket options: " + std::string(strerror(errno)));
-        return false;
-    }
-    
-    // Set non-blocking
-    int flags = fcntl(_serverSocket, F_GETFL, 0);
-    if (fcntl(_serverSocket, F_SETFL, flags | O_NONBLOCK) < 0) {
-        Utils::logError("Failed to set non-blocking mode: " + std::string(strerror(errno)));
-        return false;
+    // Add all server sockets to poll list
+    for (size_t i = 0; i < _servers.size(); ++i) {
+        struct pollfd serverPollFd;
+        serverPollFd.fd = _servers[i].socket;
+        serverPollFd.events = POLLIN;
+        _pollFds.push_back(serverPollFd);
     }
     
     return true;
 }
 
-bool Server::bindSocket() {
-    ServerConfig defaultConfig = _config.getDefaultServer();
+bool Server::createSockets() {
+    const std::vector<ServerConfig>& servers = _config.getServers();
     
-    memset(&_serverAddr, 0, sizeof(_serverAddr));
-    _serverAddr.sin_family = AF_INET;
-    _serverAddr.sin_port = htons(defaultConfig.port);
-    
-    if (defaultConfig.host == "localhost" || defaultConfig.host == "127.0.0.1") {
-        _serverAddr.sin_addr.s_addr = INADDR_ANY;
-    } else {
-        if (inet_pton(AF_INET, defaultConfig.host.c_str(), &_serverAddr.sin_addr) <= 0) {
-            Utils::logError("Invalid host address: " + defaultConfig.host);
+    for (size_t i = 0; i < servers.size(); ++i) {
+        const ServerConfig& serverConfig = servers[i];
+        ServerInfo serverInfo;
+        serverInfo.config = serverConfig;
+        
+        serverInfo.socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (serverInfo.socket < 0) {
+            Utils::logError("Failed to create socket for " + serverConfig.host + ":" + Utils::intToString(serverConfig.port));
             return false;
         }
-    }
-    
-    if (bind(_serverSocket, (struct sockaddr*)&_serverAddr, sizeof(_serverAddr)) < 0) {
-        Utils::logError("Failed to bind socket: " + std::string(strerror(errno)));
-        return false;
+        
+        // Set socket options
+        int opt = 1;
+        if (setsockopt(serverInfo.socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            Utils::logError("Failed to set socket options for " + serverConfig.host + ":" + Utils::intToString(serverConfig.port));
+            close(serverInfo.socket);
+            return false;
+        }
+        
+        // Set non-blocking
+        int flags = fcntl(serverInfo.socket, F_GETFL, 0);
+        if (fcntl(serverInfo.socket, F_SETFL, flags | O_NONBLOCK) < 0) {
+            Utils::logError("Failed to set non-blocking mode for " + serverConfig.host + ":" + Utils::intToString(serverConfig.port));
+            close(serverInfo.socket);
+            return false;
+        }
+        
+        _servers.push_back(serverInfo);
+        _serverConfigs[serverInfo.socket] = serverConfig;
     }
     
     return true;
 }
 
-bool Server::listenSocket() {
-    if (listen(_serverSocket, MAX_CONNECTIONS) < 0) {
-        Utils::logError("Failed to listen on socket: " + std::string(strerror(errno)));
-        return false;
+bool Server::bindSockets() {
+    for (size_t i = 0; i < _servers.size(); ++i) {
+        ServerInfo& serverInfo = _servers[i];
+        const ServerConfig& config = serverInfo.config;
+        
+        memset(&serverInfo.addr, 0, sizeof(serverInfo.addr));
+        serverInfo.addr.sin_family = AF_INET;
+        serverInfo.addr.sin_port = htons(config.port);
+        
+        if (config.host == "localhost" || config.host == "127.0.0.1") {
+            serverInfo.addr.sin_addr.s_addr = INADDR_ANY;
+        } else {
+            if (inet_pton(AF_INET, config.host.c_str(), &serverInfo.addr.sin_addr) <= 0) {
+                Utils::logError("Invalid host address: " + config.host);
+                return false;
+            }
+        }
+        
+        if (bind(serverInfo.socket, (struct sockaddr*)&serverInfo.addr, sizeof(serverInfo.addr)) < 0) {
+            Utils::logError("Failed to bind socket " + config.host + ":" + Utils::intToString(config.port));
+            return false;
+        }
+        
+        Utils::logInfo("Socket bound to " + config.host + ":" + Utils::intToString(config.port));
+    }
+    
+    return true;
+}
+
+bool Server::listenSockets() {
+    for (size_t i = 0; i < _servers.size(); ++i) {
+        const ServerInfo& serverInfo = _servers[i];
+        if (listen(serverInfo.socket, MAX_CONNECTIONS) < 0) {
+            Utils::logError("Failed to listen on socket " + serverInfo.config.host + ":" + Utils::intToString(serverInfo.config.port));
+            return false;
+        }
+        Utils::logInfo("Listening on " + serverInfo.config.host + ":" + Utils::intToString(serverInfo.config.port));
     }
     
     return true;
@@ -101,24 +123,28 @@ void Server::run() {
         int pollResult = poll(&_pollFds[0], _pollFds.size(), 1000);
         
         if (pollResult < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                // Interrupted by signal (e.g., Ctrl+C), exit gracefully
+                Utils::logInfo("Server interrupted by signal, shutting down...");
+                break;
+            }
             Utils::logError("Poll failed: " + std::string(strerror(errno)));
             break;
         }
         
         if (pollResult == 0) continue;
         
-        if (_pollFds[0].revents & POLLIN) {
-            acceptNewConnection();
+        // Check server sockets for new connections
+        for (size_t i = 0; i < _servers.size(); ++i) {
+            if (i < _pollFds.size() && _pollFds[i].revents & POLLIN) {
+                acceptNewConnection(_servers[i].socket);
+            }
         }
         
-        for (size_t i = 1; i < _pollFds.size(); ++i) {
+        // Check client sockets
+        for (size_t i = _servers.size(); i < _pollFds.size(); ++i) {
             if (_pollFds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) {
-                int socketError;
-                socklen_t len = sizeof(socketError);
-                if (getsockopt(_pollFds[i].fd, SOL_SOCKET, SO_ERROR, &socketError, &len) == 0 && socketError != 0) {
-                    Utils::logError("Socket error for fd " + Utils::intToString(_pollFds[i].fd) + ": " + std::string(strerror(socketError)));
-                }
+                Utils::logError("Socket error for fd " + Utils::intToString(_pollFds[i].fd));
                 removeClient(_pollFds[i].fd);
                 --i;
                 continue;
@@ -135,16 +161,14 @@ void Server::run() {
     }
 }
 
-bool Server::acceptNewConnection() {
+bool Server::acceptNewConnection(int serverSocket) {
     struct sockaddr_in clientAddr;
     socklen_t clientLen = sizeof(clientAddr);
     
-    int clientFd = accept(_serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
+    int clientFd = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
     if (clientFd < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return true;
-        }
-        Utils::logError("Failed to accept connection: " + std::string(strerror(errno)));
+        // For non-blocking sockets, since poll() indicated connection is ready,
+        // a negative return typically indicates an error
         return false;
     }
     
@@ -167,6 +191,7 @@ bool Server::acceptNewConnection() {
     _pollFds.push_back(clientPollFd);
     
     _clients[clientFd] = Client(clientFd);
+    _clientServerSockets[clientFd] = serverSocket; // Track which server socket this client came from
     
     std::string clientIP = Utils::getClientIP(clientFd);
     
@@ -303,7 +328,7 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
     if (!httpRequest.isValid()) {
         response = HttpResponse::createErrorResponse(HTTP_BAD_REQUEST);
     } else {
-        ServerConfig serverConfig = getServerConfig(httpRequest);
+        ServerConfig serverConfig = getServerConfig(clientFd);
         
         LocationConfig locationConfig = getMatchingLocation(httpRequest.getUri(), serverConfig);
         
@@ -355,11 +380,14 @@ bool Server::writeToClient(int clientFd) {
     ssize_t bytesSent = send(clientFd, response.c_str() + offset, response.length() - offset, 0);
     
     if (bytesSent < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return true; // Would block, try again later
-        }
-        Utils::logError("Failed to send response: " + std::string(strerror(errno)));
+        // For non-blocking sockets, since poll() indicated socket is ready,
+        // a negative return typically indicates an error
         return false;
+    }
+    
+    if (bytesSent == 0) {
+        // No bytes sent, but not an error - try again later
+        return true;
     }
     
     _writeOffsets[clientFd] += bytesSent;
@@ -397,6 +425,7 @@ void Server::removeClient(int clientFd) {
     _clients.erase(clientFd);
     _pendingWrites.erase(clientFd);
     _writeOffsets.erase(clientFd);
+    _clientServerSockets.erase(clientFd); // Clean up server socket mapping
 
     close(clientFd);
 }
@@ -411,11 +440,15 @@ void Server::stop() {
     _pollFds.clear();
     _pendingWrites.clear();
     _writeOffsets.clear();
+    _clientServerSockets.clear(); // Clear client-server socket mapping
     
-    if (_serverSocket >= 0) {
-        close(_serverSocket);
-        _serverSocket = -1;
+    // Close all server sockets
+    for (size_t i = 0; i < _servers.size(); ++i) {
+        close(_servers[i].socket);
     }
+    _servers.clear();
+    _serverConfigs.clear();
+    
 }
 
 HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerConfig& serverConfig) {
@@ -712,6 +745,10 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         cgi.setupEnvironment(request, serverConfig.serverName, serverConfig.port);
         
         char** envArray = cgi.createEnvArray();
+        if (!envArray) {
+            Utils::logError("Failed to create environment array for CGI");
+            return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
+        }
         
         std::string scriptDir = Utils::getDirectory(scriptPath);
         std::string scriptName = Utils::getBasename(scriptPath);
@@ -974,7 +1011,17 @@ HttpResponse Server::handleRedirection(const LocationConfig& /* location */) {
     return HttpResponse::createErrorResponse(HTTP_NOT_IMPLEMENTED);
 }
 
-ServerConfig Server::getServerConfig(const HttpRequest& /* request */) const {
+ServerConfig Server::getServerConfig(int clientFd) const {
+    // Find which server socket this client came from
+    std::map<int, int>::const_iterator it = _clientServerSockets.find(clientFd);
+    if (it != _clientServerSockets.end()) {
+        int serverSocket = it->second;
+        std::map<int, ServerConfig>::const_iterator configIt = _serverConfigs.find(serverSocket);
+        if (configIt != _serverConfigs.end()) {
+            return configIt->second;
+        }
+    }
+    // Fallback to default server if mapping not found
     return _config.getDefaultServer();
 }
 

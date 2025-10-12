@@ -28,10 +28,8 @@ bool Client::readData() {
     ssize_t bytesRead = recv(_fd, buffer, BUFFER_SIZE - 1, 0);
 
     if (bytesRead < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return true;
-        }
-        Utils::logError("Failed to read from client: " + std::string(strerror(errno)));
+        // For non-blocking sockets, since poll() indicated data is ready,
+        // a negative return typically indicates an error
         return false;
     } else if (bytesRead == 0) {
         return false;
@@ -146,8 +144,16 @@ bool Client::parseRequest() {
     if (isChunked) {
         std::string remainingData = _buffer.substr(headerEndPos);
         size_t cur = headerEndPos;
+        size_t maxChunks = 10000; // Safety limit to prevent infinite loops
+        size_t chunkCount = 0;
         
         while (true) {
+            // Safety check to prevent infinite loops
+            if (++chunkCount > maxChunks) {
+                Utils::logError("Too many chunks in request, possible attack or malformed data");
+                return false;
+            }
+            
             size_t lineEndPos;
             std::string sizeLine = get_line(_buffer, cur, lineEndPos);
             if (lineEndPos == std::string::npos) {

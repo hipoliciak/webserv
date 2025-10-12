@@ -64,18 +64,34 @@ void CGI::setupEnvironment(const HttpRequest& request, const std::string& server
 }
 
 char** CGI::createEnvArray() const {
-    char** envArray = new char*[_envVars.size() + 1];
-    size_t i = 0;
-    
-    for (std::map<std::string, std::string>::const_iterator it = _envVars.begin(); 
-         it != _envVars.end(); ++it, ++i) {
-        std::string envVar = it->first + "=" + it->second;
-        envArray[i] = new char[envVar.length() + 1];
-        strcpy(envArray[i], envVar.c_str());
+    char** envArray = NULL;
+    try {
+        envArray = new char*[_envVars.size() + 1];
+        size_t i = 0;
+        
+        for (std::map<std::string, std::string>::const_iterator it = _envVars.begin(); 
+             it != _envVars.end(); ++it, ++i) {
+            std::string envVar = it->first + "=" + it->second;
+            try {
+                envArray[i] = new char[envVar.length() + 1];
+                strcpy(envArray[i], envVar.c_str());
+            } catch (const std::bad_alloc& e) {
+                // Clean up previously allocated strings
+                for (size_t j = 0; j < i; ++j) {
+                    delete[] envArray[j];
+                }
+                delete[] envArray;
+                Utils::logError("Memory allocation failed in createEnvArray");
+                return NULL;
+            }
+        }
+        
+        envArray[i] = NULL;
+        return envArray;
+    } catch (const std::bad_alloc& e) {
+        Utils::logError("Memory allocation failed in createEnvArray");
+        return NULL;
     }
-    
-    envArray[i] = NULL;
-    return envArray;
 }
 
 void CGI::freeEnvArray(char** envArray) const {
@@ -93,33 +109,57 @@ std::string CGI::execute() {
         return "";
     }
     
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
-        Utils::logError("Failed to create pipe for CGI");
+    int stdout_pipe[2];
+    int stdin_pipe[2];
+    
+    if (pipe(stdout_pipe) == -1 || pipe(stdin_pipe) == -1) {
+        Utils::logError("Failed to create pipes for CGI");
         return "";
     }
     
     // Set up environment before forking
     char** envArray = createEnvArray();
+    if (!envArray) {
+        Utils::logError("Failed to create environment array for CGI");
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+        return "";
+    }
     
     pid_t pid = fork();
     if (pid == -1) {
         Utils::logError("Failed to fork for CGI execution");
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
         freeEnvArray(envArray);
         return "";
     }
     
     if (pid == 0) {
-        close(pipefd[0]);
+        // Child process
+        close(stdout_pipe[0]);  // Close read end of stdout pipe
+        close(stdin_pipe[1]);   // Close write end of stdin pipe
         
-        if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
+        // Redirect stdout to pipe
+        if (dup2(stdout_pipe[1], STDOUT_FILENO) == -1) {
             Utils::logError("Failed to redirect stdout in CGI child");
             freeEnvArray(envArray);
             exit(1);
         }
-        close(pipefd[1]);
+        
+        // Redirect stdin to pipe
+        if (dup2(stdin_pipe[0], STDIN_FILENO) == -1) {
+            Utils::logError("Failed to redirect stdin in CGI child");
+            freeEnvArray(envArray);
+            exit(1);
+        }
+        
+        close(stdout_pipe[1]);
+        close(stdin_pipe[0]);
         
         if (chdir(_scriptDir.c_str()) == -1) {
             Utils::logError("Failed to change directory for CGI execution");
@@ -148,21 +188,25 @@ std::string CGI::execute() {
         exit(1);
     } else {
         // Parent process
-        close(pipefd[1]);
+        close(stdout_pipe[1]);  // Close write end of stdout pipe
+        close(stdin_pipe[0]);   // Close read end of stdin pipe
         
+        // Write POST body to stdin pipe if available
         if (!_body.empty()) {
+            write(stdin_pipe[1], _body.c_str(), _body.length());
         }
+        close(stdin_pipe[1]);  // Close stdin pipe to signal EOF
         
         std::string output;
         char buffer[BUFFER_SIZE];
         ssize_t bytesRead;
         
-        while ((bytesRead = read(pipefd[0], buffer, BUFFER_SIZE - 1)) > 0) {
+        while ((bytesRead = read(stdout_pipe[0], buffer, BUFFER_SIZE - 1)) > 0) {
             buffer[bytesRead] = '\0';
             output += buffer;
         }
         
-        close(pipefd[0]);
+        close(stdout_pipe[0]);
         
         int status;
         waitpid(pid, &status, 0);
