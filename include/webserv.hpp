@@ -46,6 +46,7 @@ struct LocationConfig {
     std::string uploadPath;
     std::string cgiPath;
     std::string cgiExtension;
+    bool isRegex;
 };
 
 // Common constants

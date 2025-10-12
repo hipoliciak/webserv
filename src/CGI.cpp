@@ -43,9 +43,9 @@ void CGI::setupEnvironment(const HttpRequest& request, const std::string& server
     _envVars["SERVER_PORT"] = Utils::intToString(serverPort);
     _envVars["SERVER_PROTOCOL"] = request.getVersion();
     _envVars["GATEWAY_INTERFACE"] = "CGI/1.1";
-    _envVars["SCRIPT_NAME"] = extractFilename(_scriptPath);
+    _envVars["SCRIPT_NAME"] = request.getUri();
     _envVars["SCRIPT_FILENAME"] = _scriptPath;
-    _envVars["PATH_INFO"] = "";
+    _envVars["PATH_INFO"] = request.getUri();
     _envVars["PATH_TRANSLATED"] = "";
     _envVars["REMOTE_ADDR"] = "127.0.0.1";
     _envVars["REMOTE_HOST"] = "";

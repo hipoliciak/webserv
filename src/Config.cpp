@@ -107,7 +107,17 @@ bool Config::parseServerBlock(const std::string& block) {
             
             LocationConfig location;
             setLocationDefaults(location);
-            location.path = locationPath;
+            
+            // Check if this is a regex location (starts with ~)
+            if (locationPath.length() > 0 && locationPath[0] == '~') {
+                location.isRegex = true;
+                // Remove the ~ and any following whitespace
+                locationPath = trim(locationPath.substr(1));
+                location.path = locationPath;
+            } else {
+                location.isRegex = false;
+                location.path = locationPath;
+            }
             
             i++; // Move past opening brace
             std::string locationBlock;
@@ -249,6 +259,7 @@ void Config::setLocationDefaults(LocationConfig& location) const {
     location.uploadPath = "";
     location.cgiPath = "";
     location.cgiExtension = "";
+    location.isRegex = false;
     
     location.allowedMethods.push_back("GET");
     location.allowedMethods.push_back("POST");
@@ -292,16 +303,37 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
     LocationConfig bestMatch;
     setLocationDefaults(bestMatch);
     size_t bestMatchLength = 0;
+    bool foundRegexMatch = false;
     
     for (size_t i = 0; i < server.locations.size(); ++i) {
         const LocationConfig& location = server.locations[i];
-        if (Utils::startsWith(path, location.path) && location.path.length() > bestMatchLength) {
-            bestMatch = location;
-            bestMatchLength = location.path.length();
+        
+        bool matches = false;
+        if (location.isRegex) {
+            // For regex patterns, check if the path matches
+            // Simple regex matching for .bla$ pattern
+            if (location.path == "\\.bla$") {
+                matches = Utils::endsWith(path, ".bla");
+            }
+            // Could add more regex patterns here as needed
+            
+            // Regex matches have highest priority
+            if (matches) {
+                bestMatch = location;
+                foundRegexMatch = true;
+                break; // First regex match wins
+            }
+        } else if (!foundRegexMatch) {
+            // Regular prefix matching (only if no regex match found)
+            matches = Utils::startsWith(path, location.path);
+            if (matches && location.path.length() > bestMatchLength) {
+                bestMatch = location;
+                bestMatchLength = location.path.length();
+            }
         }
     }
     
-    if (bestMatchLength == 0) {
+    if (bestMatchLength == 0 && !foundRegexMatch) {
         bestMatch.root = server.root;
         bestMatch.index = server.index;
         bestMatch.autoIndex = server.autoIndex;

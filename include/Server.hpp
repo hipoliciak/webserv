@@ -52,7 +52,7 @@ public:
     HttpResponse generateDirectoryListing(const std::string& path, const std::string& urlPath);
     
     // CGI handling
-    HttpResponse executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig);
+    HttpResponse executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig);
     
     // Upload handling
     HttpResponse handleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig);

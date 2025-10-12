@@ -1,5 +1,6 @@
 #include "../include/Server.hpp"
 #include "../include/Utils.hpp"
+#include "../include/CGI.hpp"
 
 Server::Server() : _serverSocket(-1), _running(false) {
     _config = Config();
@@ -423,7 +424,8 @@ HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerCo
     std::string extension = Utils::getFileExtension(filePath);
     if (extension == ".php" || extension == ".py" || extension == ".sh") {
         if (Utils::fileExists(filePath)) {
-            return executeCGI(filePath, request, serverConfig);
+            LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
+            return executeCGI(filePath, request, serverConfig, location);
         } else {
             return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
         }
@@ -453,7 +455,8 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     std::string extension = Utils::getFileExtension(filePath);
     if (extension == ".php" || extension == ".py" || extension == ".sh" || extension == ".bla") {
         if (Utils::fileExists(filePath)) {
-            return executeCGI(filePath, request, serverConfig);
+            LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
+            return executeCGI(filePath, request, serverConfig, location);
         } else {
             return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
         }
@@ -649,17 +652,20 @@ HttpResponse Server::generateDirectoryListing(const std::string& path, const std
     return response;
 }
 
-HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig) {
+HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig) {
     // Check if file exists
     if (!Utils::fileExists(scriptPath)) {
         return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
     }
     
-    // Determine CGI interpreter
+    // Determine CGI interpreter/executable
     std::string interpreter;
     std::string extension = Utils::getFileExtension(scriptPath);
     
-    if (extension == ".php") {
+    // Check if this location has a specific CGI path configured
+    if (!locationConfig.cgiPath.empty()) {
+        interpreter = locationConfig.cgiPath;
+    } else if (extension == ".php") {
         interpreter = "/usr/bin/php-cgi";
     } else if (extension == ".py") {
         interpreter = "/usr/bin/python3";
@@ -698,18 +704,14 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         close(pipeFdIn[0]);
         close(pipeFdOut[1]);
         
-        // Set environment variables
-        std::string queryString = request.getUri().find('?') != std::string::npos 
-            ? request.getUri().substr(request.getUri().find('?') + 1) : "";
-            
-        setenv("REQUEST_METHOD", request.getMethod().c_str(), 1);
-        setenv("SCRIPT_NAME", scriptPath.c_str(), 1);
-        setenv("QUERY_STRING", queryString.c_str(), 1);
-        setenv("CONTENT_TYPE", request.getHeader("Content-Type").c_str(), 1);
-        setenv("CONTENT_LENGTH", Utils::sizeToString(request.getContentLength()).c_str(), 1);
-        setenv("SERVER_NAME", serverConfig.serverName.c_str(), 1);
-        setenv("SERVER_PORT", Utils::intToString(serverConfig.port).c_str(), 1);
-        setenv("SERVER_PROTOCOL", "HTTP/1.1", 1);
+        // Set up CGI environment using the CGI class
+        CGI cgi;
+        cgi.setScriptPath(scriptPath);
+        cgi.setInterpreter(interpreter);
+        cgi.setBody(request.getBody());
+        cgi.setupEnvironment(request, serverConfig.serverName, serverConfig.port);
+        
+        char** envArray = cgi.createEnvArray();
         
         std::string scriptDir = Utils::getDirectory(scriptPath);
         std::string scriptName = Utils::getBasename(scriptPath);
@@ -717,12 +719,21 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
             chdir(scriptDir.c_str());
         }
         
-        if (extension == ".php") {
-            execl(interpreter.c_str(), interpreter.c_str(), scriptName.c_str(), NULL);
+        // Execute based on whether we have a custom CGI path or standard interpreter
+        if (!locationConfig.cgiPath.empty()) {
+            // Custom CGI executable (like ubuntu_cgi_tester)
+            char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptPath.c_str()), NULL };
+            execve(interpreter.c_str(), args, envArray);
+        } else if (extension == ".php") {
+            char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptName.c_str()), NULL };
+            execve(interpreter.c_str(), args, envArray);
         } else {
-            execl(interpreter.c_str(), interpreter.c_str(), scriptName.c_str(), NULL);
+            char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptName.c_str()), NULL };
+            execve(interpreter.c_str(), args, envArray);
         }
         
+        // Clean up environment array if exec fails
+        cgi.freeEnvArray(envArray);
         Utils::logError("exec failed: " + std::string(strerror(errno)));
         exit(1);
     } else {
