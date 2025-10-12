@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Development Server - Port 8083</title>
+    <style>
+        body { 
+            font-family: 'Courier New', monospace; 
+            margin: 40px; 
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: #ecf0f1;
+            min-height: 90vh;
+        }
+        .container { 
+            max-width: 900px; 
+            margin: 0 auto; 
+            background: rgba(52, 73, 94, 0.8); 
+            padding: 30px; 
+            border-radius: 15px;
+            border: 1px solid #34495e;
+        }
+        h1 { color: #e74c3c; text-align: center; font-size: 2.5em; }
+        .server-badge { 
+            background: #e67e22; 
+            color: white; 
+            padding: 10px 20px; 
+            border-radius: 25px; 
+            display: inline-block; 
+            margin: 20px 0;
+            font-family: Arial, sans-serif;
+        }
+        .dev-grid { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); 
+            gap: 20px; 
+            margin: 30px 0; 
+        }
+        .dev-card { 
+            background: rgba(44, 62, 80, 0.7); 
+            padding: 20px; 
+            border-radius: 10px; 
+            text-align: center;
+            border: 1px solid #7f8c8d;
+            transition: all 0.3s;
+        }
+        .dev-card:hover { 
+            transform: translateY(-5px); 
+            border-color: #e74c3c;
+            box-shadow: 0 5px 15px rgba(231,76,60,0.3);
+        }
+        .dev-link { 
+            color: #3498db; 
+            text-decoration: none; 
+            font-weight: bold; 
+            font-size: 1.1em;
+        }
+        .dev-link:hover { color: #5dade2; }
+        .terminal-section {
+            background: #2c3e50;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border-left: 4px solid #e74c3c;
+            font-family: 'Courier New', monospace;
+        }
+        code { background: #34495e; padding: 2px 6px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚡ Development Server</h1>
+        <div class="server-badge">Port 8083 - CGI Development & Testing</div>
+        
+        <p>Welcome to the development server! This server is optimized for CGI script development, testing, and debugging.</p>
+        
+        <div class="terminal-section">
+            <h3>🔧 Development Environment</h3>
+            <p>CGI Support: <code>Python3</code>, <code>Bash</code>, <code>PHP</code></p>
+            <p>Directory Browsing: <strong>Enabled</strong> for exploration</p>
+        </div>
+        
+        <div class="dev-grid">
+            <div class="dev-card">
+                <h3>🐍 Python CGI</h3>
+                <a href="/cgi-bin/test.py" class="dev-link">Run Python Script</a>
+            </div>
+            <div class="dev-card">
+                <h3>🐚 Bash CGI</h3>
+                <a href="/cgi-bin/info.sh" class="dev-link">Run Bash Script</a>
+            </div>
+            <div class="dev-card">
+                <h3>� PHP CGI</h3>
+                <a href="/cgi-bin/test.php" class="dev-link">Run PHP Script</a>
+            </div>
+            <div class="dev-card">
+                <h3>🚨 Error Testing</h3>
+                <a href="/error/" class="dev-link">Test Error Pages</a>
+            </div>
+            <div class="dev-card">
+                <h3> Test Page</h3>
+                <a href="/test.html" class="dev-link">View Test HTML</a>
+            </div>
+        </div>
+        
+        <h2>Development Features:</h2>
+        <ul>
+            <li><strong>CGI Execution</strong> - Python, Bash, and PHP script support</li>
+            <li><strong>Directory Browsing</strong> - Explore all directories and files</li>
+            <li><strong>Error Page Testing</strong> - Test custom error responses</li>
+            <li><strong>Script Debugging</strong> - Full CGI environment variables</li>
+        </ul>
+        
+        <p><em>Server optimized for development, testing, and CGI script execution</em></p>
+    </div>
+</body>
+</html>

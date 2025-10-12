@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Server - Port 8081</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 40px; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 90vh;
+        }
+        .container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            background: rgba(255,255,255,0.1); 
+            padding: 30px; 
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+        }
+        h1 { color: #fff; text-align: center; font-size: 2.5em; }
+        .server-badge { 
+            background: #4CAF50; 
+            color: white; 
+            padding: 10px 20px; 
+            border-radius: 25px; 
+            display: inline-block; 
+            margin: 20px 0;
+        }
+        .api-grid { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
+            gap: 20px; 
+            margin: 30px 0; 
+        }
+        .api-card { 
+            background: rgba(255,255,255,0.2); 
+            padding: 20px; 
+            border-radius: 10px; 
+            text-align: center;
+            transition: transform 0.3s;
+        }
+        .api-card:hover { transform: translateY(-5px); }
+        .api-link { 
+            color: #FFE082; 
+            text-decoration: none; 
+            font-weight: bold; 
+            font-size: 1.1em;
+        }
+        .api-link:hover { color: #FFF59D; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔗 API Server</h1>
+        <div class="server-badge">Port 8081 - JSON & API Endpoints</div>
+        
+        <p>Welcome to the dedicated API server! This server is optimized for JSON data exchange and API interactions.</p>
+        
+        <div class="api-grid">
+            <div class="api-card">
+                <h3>📊 Test API</h3>
+                <a href="/api/" class="api-link">Browse API Directory</a>
+            </div>
+            <div class="api-card">
+                <h3>📄 JSON Data</h3>
+                <a href="/api/test.json" class="api-link">View Test JSON</a>
+            </div>
+            <div class="api-card">
+                <h3>📁 File Listings</h3>
+                <a href="/files/" class="api-link">Browse Files</a>
+            </div>
+        </div>
+        
+        <h2>Available Endpoints:</h2>
+        <ul>
+            <li><strong>GET /api/</strong> - API directory listing</li>
+            <li><strong>GET /api/test.json</strong> - Sample JSON response</li>
+            <li><strong>POST /api/</strong> - Submit JSON data</li>
+            <li><strong>GET /files/</strong> - File directory listing</li>
+        </ul>
+        
+        <p><em>Server optimized for API development and JSON data exchange</em></p>
+    </div>
+</body>
+</html>
