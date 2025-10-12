@@ -264,7 +264,7 @@ void Server::handleClientRead(int clientFd) {
                                                    " exceeds server limit " + Utils::sizeToString(serverConfig.maxBodySize));
                                     
                                     client.stopReading();
-                                    HttpResponse response = HttpResponse::createErrorResponse(413);
+                                    HttpResponse response = createErrorResponse(413, serverConfig);
                                     queueResponse(clientFd, response);
                                     return;
                                 }
@@ -295,7 +295,7 @@ void Server::handleClientRead(int clientFd) {
                                     if (currentBufferSize > serverConfig.maxBodySize + 1024) {
                                         Utils::logError("Chunked request already exceeds buffer limit");
                                         client.stopReading();
-                                        HttpResponse response = HttpResponse::createErrorResponse(413);
+                                        HttpResponse response = createErrorResponse(413, serverConfig);
                                         queueResponse(clientFd, response);
                                         return;
                                     }
@@ -326,7 +326,8 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
     HttpResponse response;
     
     if (!httpRequest.isValid()) {
-        response = HttpResponse::createErrorResponse(HTTP_BAD_REQUEST);
+        ServerConfig serverConfig = getServerConfig(clientFd);
+        response = createErrorResponse(HTTP_BAD_REQUEST, serverConfig);
     } else {
         ServerConfig serverConfig = getServerConfig(clientFd);
         
@@ -341,7 +342,7 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
         }
         
         if (!isBlaFile && !isMethodAllowed(httpRequest.getMethod(), serverConfig, locationConfig)) {
-            response = HttpResponse::createErrorResponse(HTTP_METHOD_NOT_ALLOWED);
+            response = createErrorResponse(HTTP_METHOD_NOT_ALLOWED, serverConfig);
         } else {
             if (httpRequest.getMethod() == "GET") {
                 response = handleGETRequest(httpRequest, serverConfig);
@@ -352,7 +353,7 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
             } else if (httpRequest.getMethod() == "DELETE") {
                 response = handleDELETERequest(httpRequest, serverConfig);
             } else {
-                response = HttpResponse::createErrorResponse(HTTP_METHOD_NOT_ALLOWED);
+                response = createErrorResponse(HTTP_METHOD_NOT_ALLOWED, serverConfig);
             }
         }
     }
@@ -460,7 +461,7 @@ HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerCo
             LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
             return executeCGI(filePath, request, serverConfig, location);
         } else {
-            return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
+            return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
         }
     }
     
@@ -471,7 +472,7 @@ HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerCo
             return serveStaticFile(filePath, serverConfig);
         }
     } else {
-        return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
+        return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
     }
 }
 
@@ -495,6 +496,11 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
         }
     }
     
+    // Handle JSON POST requests to create files
+    if (contentType.find("application/json") != std::string::npos) {
+        return handleJSONPost(request, serverConfig);
+    }
+    
     // Regular POST request
     HttpResponse response;
     response.setStatus(HTTP_OK);
@@ -508,12 +514,12 @@ HttpResponse Server::handlePUTRequest(const HttpRequest& request, const ServerCo
     
     // Security check - ensure the file path is within the server root
     if (filePath.find("..") != std::string::npos) {
-        return HttpResponse::createErrorResponse(HTTP_FORBIDDEN);
+        return createErrorResponse(HTTP_FORBIDDEN, serverConfig);
     }
     
     // Write the request body to the file
     if (!Utils::writeFile(filePath, request.getBody())) {
-        return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
     
     Utils::logInfo("File uploaded via PUT: " + filePath);
@@ -531,17 +537,17 @@ HttpResponse Server::handleDELETERequest(const HttpRequest& request, const Serve
     
     // Security check - ensure the file is within the server root
     if (filePath.find("..") != std::string::npos) {
-        return HttpResponse::createErrorResponse(HTTP_FORBIDDEN);
+        return createErrorResponse(HTTP_FORBIDDEN, serverConfig);
     }
     
     // Check if file exists
     if (!Utils::fileExists(filePath)) {
-        return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
+        return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
     }
     
     // Check if it's a directory
     if (Utils::isDirectory(filePath)) {
-        return HttpResponse::createErrorResponse(HTTP_FORBIDDEN);
+        return createErrorResponse(HTTP_FORBIDDEN, serverConfig);
     }
     
     // Attempt to delete the file
@@ -555,7 +561,7 @@ HttpResponse Server::handleDELETERequest(const HttpRequest& request, const Serve
         return response;
     } else {
         Utils::logError("Failed to delete file: " + filePath + " - " + std::string(strerror(errno)));
-        return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
 }
 
@@ -576,11 +582,11 @@ HttpResponse Server::handleDirectoryRequest(const std::string& path, const std::
         if (Utils::fileExists(youpiPath) && !Utils::isDirectory(youpiPath)) {
             return serveStaticFile(youpiPath, serverConfig);
         }
-        return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
+        return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
     }
     
     if (!location.autoIndex) {
-        return HttpResponse::createErrorResponse(HTTP_FORBIDDEN);
+        return createErrorResponse(HTTP_FORBIDDEN, serverConfig);
     }
     
     std::string urlPath = uri;
@@ -589,13 +595,13 @@ HttpResponse Server::handleDirectoryRequest(const std::string& path, const std::
         if (urlPath.empty()) urlPath = "/";
     }
     
-    return generateDirectoryListing(path, urlPath);
+    return generateDirectoryListing(path, urlPath, serverConfig);
 }
 
-HttpResponse Server::generateDirectoryListing(const std::string& path, const std::string& urlPath) {
+HttpResponse Server::generateDirectoryListing(const std::string& path, const std::string& urlPath, const ServerConfig& serverConfig) {
     DIR* dir = opendir(path.c_str());
     if (!dir) {
-        return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
     
     std::string html = "<!DOCTYPE html>\n";
@@ -688,7 +694,7 @@ HttpResponse Server::generateDirectoryListing(const std::string& path, const std
 HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig) {
     // Check if file exists
     if (!Utils::fileExists(scriptPath)) {
-        return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
+        return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
     }
     
     // Determine CGI interpreter/executable
@@ -705,14 +711,14 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
     } else if (extension == ".sh") {
         interpreter = "/bin/bash";
     } else {
-        return HttpResponse::createErrorResponse(HTTP_NOT_IMPLEMENTED);
+        return createErrorResponse(HTTP_NOT_IMPLEMENTED, serverConfig);
     }
     
     // Create pipes for communication
     int pipeFdIn[2], pipeFdOut[2];
     if (pipe(pipeFdIn) == -1 || pipe(pipeFdOut) == -1) {
         Utils::logError("Failed to create pipes for CGI: " + std::string(strerror(errno)));
-        return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
     
     pid_t pid = fork();
@@ -720,7 +726,7 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         Utils::logError("Failed to fork for CGI: " + std::string(strerror(errno)));
         close(pipeFdIn[0]); close(pipeFdIn[1]);
         close(pipeFdOut[0]); close(pipeFdOut[1]);
-        return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
     
     if (pid == 0) {
@@ -762,7 +768,7 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
             char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptPath.c_str()), NULL };
             execve(interpreter.c_str(), args, envArray);
         } else if (extension == ".php") {
-            char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptName.c_str()), NULL };
+            char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptPath.c_str()), NULL };
             execve(interpreter.c_str(), args, envArray);
         } else {
             char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptName.c_str()), NULL };
@@ -1036,4 +1042,87 @@ const std::string& Server::getHost() const {
 
 bool Server::isRunning() const {
     return _running;
+}
+
+HttpResponse Server::handleJSONPost(const HttpRequest& request, const ServerConfig& serverConfig) {
+    std::string uri = request.getUri();
+    std::string body = request.getBody();
+    
+    // Generate a filename based on current timestamp if posting to a directory
+    std::string filePath;
+    if (uri.empty() || uri[uri.length() - 1] == '/') {
+        // Posting to directory - create timestamped file
+        time_t now = time(0);
+        std::string timestamp = Utils::sizeToString(now);
+        filePath = resolveFilePath(uri + "post-" + timestamp + ".json", serverConfig);
+    } else if (uri.find(".json") == std::string::npos) {
+        // No .json extension - add it
+        filePath = resolveFilePath(uri + ".json", serverConfig);
+    } else {
+        // Use the URI as-is
+        filePath = resolveFilePath(uri, serverConfig);
+    }
+    
+    // Security check - ensure the file path is within the server root
+    if (filePath.find("..") != std::string::npos) {
+        return createErrorResponse(HTTP_FORBIDDEN, serverConfig);
+    }
+    
+    // Write the JSON content to the file
+    if (!Utils::writeFile(filePath, body)) {
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
+    }
+    
+    Utils::logInfo("JSON file created via POST: " + filePath);
+    
+    // Return 201 Created with the file location
+    HttpResponse response(201);
+    response.setContentType("application/json");
+    response.setHeader("Location", uri);
+    response.setBody("{\"message\":\"JSON file created successfully\",\"location\":\"" + uri + "\"}");
+    
+    return response;
+}
+
+HttpResponse Server::createErrorResponse(int statusCode, const ServerConfig& serverConfig) {
+    // Check if custom error page is configured
+    std::map<int, std::string>::const_iterator it = serverConfig.errorPages.find(statusCode);
+    if (it != serverConfig.errorPages.end()) {
+        // Construct full path to error page file
+        std::string errorPagePath = serverConfig.root;
+        if (!errorPagePath.empty() && errorPagePath[errorPagePath.length() - 1] != '/') {
+            errorPagePath += "/";
+        }
+        std::string relativePath = it->second;
+        if (!relativePath.empty() && relativePath[0] == '/') {
+            relativePath = relativePath.substr(1);
+        }
+        errorPagePath += relativePath;
+        
+        // Try to read custom error page
+        std::ifstream file(errorPagePath.c_str());
+        if (file.is_open()) {
+            std::string content;
+            std::string line;
+            while (std::getline(file, line)) {
+                content += line + "\n";
+            }
+            file.close();
+            
+            // Create response with custom error page content
+            HttpResponse response;
+            response.setStatus(statusCode);
+            response.setHeader("Content-Type", "text/html");
+            response.setHeader("Content-Length", Utils::sizeToString(content.length()));
+            response.setBody(content);
+            return response;
+        } else {
+            Utils::logError("Failed to open error page file: " + errorPagePath);
+        }
+    } else {
+        Utils::logInfo("No custom error page configured for status " + Utils::intToString(statusCode));
+    }
+    
+    // Fallback to default error response
+    return HttpResponse::createErrorResponse(statusCode);
 }

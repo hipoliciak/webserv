@@ -183,7 +183,7 @@ bool Config::parseServerBlock(const std::string& block) {
         } else if (directive == "error_page") {
             if (tokens.size() >= 3) {
                 int errorCode = Utils::stringToInt(tokens[1]);
-                config.errorPages[errorCode] = extractValue(trimmedLine.substr(trimmedLine.find(tokens[2])));
+                config.errorPages[errorCode] = tokens[2];
             }
         } else if (directive == "allow_methods") {
             std::vector<std::string> methods = extractValues(trimmedLine);

@@ -56,13 +56,14 @@ public:
     // File operations
     HttpResponse serveStaticFile(const std::string& path, const ServerConfig& serverConfig);
     HttpResponse handleDirectoryRequest(const std::string& path, const std::string& uri, const ServerConfig& serverConfig);
-    HttpResponse generateDirectoryListing(const std::string& path, const std::string& urlPath);
+    HttpResponse generateDirectoryListing(const std::string& path, const std::string& urlPath, const ServerConfig& serverConfig);
     
     // CGI handling
     HttpResponse executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig);
     
     // Upload handling
     HttpResponse handleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig);
+    HttpResponse handleJSONPost(const HttpRequest& request, const ServerConfig& serverConfig);
     bool saveUploadedFile(const std::string& filename, const std::string& content, const std::string& uploadPath);
     
     // Route handling
@@ -72,6 +73,9 @@ public:
     
     // Redirection
     HttpResponse handleRedirection(const LocationConfig& location);
+    
+    // Error handling
+    HttpResponse createErrorResponse(int statusCode, const ServerConfig& serverConfig);
     
     // Getters
     int getPort() const;

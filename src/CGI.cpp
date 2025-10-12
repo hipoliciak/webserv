@@ -44,11 +44,22 @@ void CGI::setupEnvironment(const HttpRequest& request, const std::string& server
     _envVars["SERVER_PROTOCOL"] = request.getVersion();
     _envVars["GATEWAY_INTERFACE"] = "CGI/1.1";
     _envVars["SCRIPT_NAME"] = request.getUri();
-    _envVars["SCRIPT_FILENAME"] = _scriptPath;
+    
+    // Ensure SCRIPT_FILENAME is absolute path
+    std::string absoluteScriptPath = _scriptPath;
+    if (!absoluteScriptPath.empty() && absoluteScriptPath[0] != '/') {
+        char* cwd = getcwd(NULL, 0);
+        if (cwd) {
+            absoluteScriptPath = std::string(cwd) + "/" + _scriptPath;
+            free(cwd);
+        }
+    }
+    _envVars["SCRIPT_FILENAME"] = absoluteScriptPath;
     _envVars["PATH_INFO"] = request.getUri();
     _envVars["PATH_TRANSLATED"] = "";
     _envVars["REMOTE_ADDR"] = "127.0.0.1";
     _envVars["REMOTE_HOST"] = "";
+    _envVars["REDIRECT_STATUS"] = "200"; // Required for PHP CGI security
     _envVars["AUTH_TYPE"] = "";
     _envVars["REMOTE_USER"] = "";
     _envVars["REMOTE_IDENT"] = "";
