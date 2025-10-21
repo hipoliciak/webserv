@@ -10,11 +10,9 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
-Client::Client() : _fd(-1), _requestComplete(false), _lastActivity(time(NULL)), _stopReading(false) {
-}
+Client::Client() : _fd(-1), _requestComplete(false), _lastActivity(time(NULL)), _stopReading(false), _lastBufferSize(0) {}
 
-Client::Client(int fd) : _fd(fd), _requestComplete(false), _lastActivity(time(NULL)), _stopReading(false) {
-}
+Client::Client(int fd) : _fd(fd), _requestComplete(false), _lastActivity(time(NULL)), _stopReading(false), _lastBufferSize(0) {}
 
 Client::~Client() {
 }
@@ -28,10 +26,14 @@ bool Client::readData() {
     ssize_t bytesRead = recv(_fd, buffer, BUFFER_SIZE - 1, 0);
 
     if (bytesRead < 0) {
-        // For non-blocking sockets, since poll() indicated data is ready,
-        // a negative return typically indicates an error
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // No data available right now for non-blocking socket
+            return true;
+        }
+        // Real error occurred
         return false;
     } else if (bytesRead == 0) {
+        // Connection closed by client
         return false;
     }
 
@@ -69,6 +71,12 @@ static std::string get_line(const std::string& s, size_t start, size_t& lineEndP
 }
 
 bool Client::parseRequest() {
+    // If no new data since last parse, don't waste CPU
+    if (_buffer.size() == _lastBufferSize) {
+        return false;
+    }
+    _lastBufferSize = _buffer.size();
+    
     size_t headerEndPos = _buffer.find("\r\n\r\n");
     if (headerEndPos == std::string::npos) {
         headerEndPos = _buffer.find("\n\n");
@@ -100,7 +108,12 @@ bool Client::parseRequest() {
                 if (Utils::toLower(val).find("100-continue") != std::string::npos) {
                     const char *continue_msg = "HTTP/1.1 100 Continue\r\n\r\n";
                     ssize_t s = send(_fd, continue_msg, strlen(continue_msg), 0);
-                    (void)s;
+                    if (s < 0) {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            // Real error occurred, but continue processing
+                            Utils::logError("Failed to send 100 Continue response");
+                        }
+                    }
                 }
             }
         }
@@ -142,21 +155,31 @@ bool Client::parseRequest() {
     }
 
     if (isChunked) {
-        std::string remainingData = _buffer.substr(headerEndPos);
         size_t cur = headerEndPos;
-        size_t maxChunks = 10000; // Safety limit to prevent infinite loops
+        size_t maxChunks = 100000; // Increased for large requests
         size_t chunkCount = 0;
         
         while (true) {
             // Safety check to prevent infinite loops
             if (++chunkCount > maxChunks) {
-                Utils::logError("Too many chunks in request, possible attack or malformed data");
+                Utils::logError("Too many chunks in request (" + Utils::sizeToString(chunkCount) + "), possible large file or attack");
                 return false;
             }
             
+            if (chunkCount % 10000 == 0) {
+                Utils::logInfo("Processing chunk " + Utils::sizeToString(chunkCount) + ", buffer size: " + Utils::sizeToString(_buffer.size()));
+            }
+            
+            size_t oldCur = cur;
             size_t lineEndPos;
             std::string sizeLine = get_line(_buffer, cur, lineEndPos);
             if (lineEndPos == std::string::npos) {
+                return false;
+            }
+            
+            // Check if we actually made progress
+            if (lineEndPos == oldCur) {
+                Utils::logError("No progress in chunk parsing, breaking to avoid infinite loop");
                 return false;
             }
             sizeLine = Utils::trim(sizeLine);
@@ -171,6 +194,10 @@ bool Client::parseRequest() {
             if (endptr == hexStr.c_str()) {
                 return false;
             }
+            
+            // if (chunkCount == 1 || chunkCount % 10000 == 0) {
+            //     Utils::logInfo("Chunk " + Utils::sizeToString(chunkCount) + " size: " + Utils::sizeToString(chunkSize) + " bytes");
+            // }
             
             cur = lineEndPos;
 
@@ -194,9 +221,11 @@ bool Client::parseRequest() {
 
             size_t need = cur + chunkSize;
             if (_buffer.size() < need) {
+                // Not enough data yet, need to wait for more
                 return false;
             }
-            if (_buffer.size() < need + 1) {
+            if (_buffer.size() < need + 2) {
+                // Need at least 2 more bytes for CRLF
                 return false;
             }
             if (need + 1 < _buffer.size() && _buffer[need] == '\r' && _buffer[need + 1] == '\n') {
@@ -239,6 +268,7 @@ bool Client::parseRequest() {
 void Client::clearRequest() {
     _request.clear();
     _requestComplete = false;
+    _lastBufferSize = 0;
 }
 
 int Client::getFd() const {

@@ -63,6 +63,7 @@ public:
     
     // Upload handling
     HttpResponse handleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig);
+    HttpResponse handleSimpleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& location);
     HttpResponse handleJSONPost(const HttpRequest& request, const ServerConfig& serverConfig);
     bool saveUploadedFile(const std::string& filename, const std::string& content, const std::string& uploadPath);
     

@@ -39,6 +39,9 @@ public:
     bool hasHeader(const std::string& key) const;
     size_t getContentLength() const;
 
+private:
+    std::string decodeChunkedBody(const std::string& rawBody) const;
+
 };
 
 #endif

@@ -1,0 +1,32 @@
+{
+	"users": [
+		{
+			"user": "dmodrzej",
+			"date": "2025-10-21T10:15:30Z",
+			"actions": [
+				{
+					"action": "edit",
+					"file": "file:///home/dmodrzej/webserv/EVALUATION_HELP.md",
+					"changes": [
+						{
+							"type": "deletion",
+							"lines": [518, 531]
+						},
+						{
+							"type": "deletion",
+							"lines": [498, 511]
+						},
+						{
+							"type": "deletion",
+							"lines": [520, 528]
+						},
+						{
+							"type": "deletion",
+							"lines": [525, 531]
+						}
+					]
+				}
+			]
+		}
+	]
+}

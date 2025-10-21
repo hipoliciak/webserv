@@ -11,6 +11,7 @@ private:
     bool _requestComplete;
     time_t _lastActivity;
     bool _stopReading;
+    size_t _lastBufferSize;
 
 public:
     Client();

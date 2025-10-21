@@ -202,9 +202,21 @@ std::string CGI::execute() {
         close(stdout_pipe[1]);  // Close write end of stdout pipe
         close(stdin_pipe[0]);   // Close read end of stdin pipe
         
+        // Make pipes non-blocking
+        int flags;
+        flags = fcntl(stdin_pipe[1], F_GETFL, 0);
+        fcntl(stdin_pipe[1], F_SETFL, flags | O_NONBLOCK);
+        flags = fcntl(stdout_pipe[0], F_GETFL, 0);
+        fcntl(stdout_pipe[0], F_SETFL, flags | O_NONBLOCK);
+        
         // Write POST body to stdin pipe if available
         if (!_body.empty()) {
-            write(stdin_pipe[1], _body.c_str(), _body.length());
+            ssize_t written = write(stdin_pipe[1], _body.c_str(), _body.length());
+            if (written < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    Utils::logError("Failed to write to CGI stdin: " + std::string(strerror(errno)));
+                }
+            }
         }
         close(stdin_pipe[1]);  // Close stdin pipe to signal EOF
         
@@ -212,9 +224,41 @@ std::string CGI::execute() {
         char buffer[BUFFER_SIZE];
         ssize_t bytesRead;
         
-        while ((bytesRead = read(stdout_pipe[0], buffer, BUFFER_SIZE - 1)) > 0) {
-            buffer[bytesRead] = '\0';
-            output += buffer;
+        // Use select for reading with timeout
+        fd_set readfds;
+        struct timeval timeout;
+        timeout.tv_sec = 30;  // 30 second timeout
+        timeout.tv_usec = 0;
+        
+        while (true) {
+            FD_ZERO(&readfds);
+            FD_SET(stdout_pipe[0], &readfds);
+            
+            int selectResult = select(stdout_pipe[0] + 1, &readfds, NULL, NULL, &timeout);
+            if (selectResult < 0) {
+                Utils::logError("Select failed on CGI stdout pipe: " + std::string(strerror(errno)));
+                break;
+            } else if (selectResult == 0) {
+                Utils::logError("CGI timeout after 30 seconds");
+                break;
+            }
+            
+            if (FD_ISSET(stdout_pipe[0], &readfds)) {
+                bytesRead = read(stdout_pipe[0], buffer, BUFFER_SIZE - 1);
+                if (bytesRead < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        continue;
+                    }
+                    Utils::logError("Error reading from CGI stdout: " + std::string(strerror(errno)));
+                    break;
+                } else if (bytesRead == 0) {
+                    // End of data
+                    break;
+                } else {
+                    buffer[bytesRead] = '\0';
+                    output += buffer;
+                }
+            }
         }
         
         close(stdout_pipe[0]);

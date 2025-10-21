@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -47,6 +48,7 @@ struct LocationConfig {
     std::string cgiPath;
     std::string cgiExtension;
     bool isRegex;
+    size_t maxBodySize;
 };
 
 // Common constants

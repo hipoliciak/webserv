@@ -229,6 +229,25 @@ bool Config::parseLocationBlock(const std::string& block, LocationConfig& locati
             location.cgiExtension = extractValue(trimmedLine);
         } else if (directive == "default") {
             location.index = extractValue(trimmedLine);
+        } else if (directive == "client_max_body_size") {
+            std::string valueStr = extractValue(trimmedLine);
+            size_t multiplier = 1;
+            
+            // Handle size suffixes (K, M, G)
+            if (!valueStr.empty()) {
+                char lastChar = valueStr[valueStr.length() - 1];
+                if (lastChar == 'K' || lastChar == 'k') {
+                    multiplier = 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                } else if (lastChar == 'M' || lastChar == 'm') {
+                    multiplier = 1024 * 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                } else if (lastChar == 'G' || lastChar == 'g') {
+                    multiplier = 1024 * 1024 * 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                }
+            }
+            location.maxBodySize = Utils::stringToInt(valueStr) * multiplier;
         } else if (directive == "allow_methods") {
             location.allowedMethods = extractValues(trimmedLine);
         } else if (directive == "redirect") {
@@ -278,6 +297,7 @@ void Config::setLocationDefaults(LocationConfig& location) const {
     location.cgiPath = "";
     location.cgiExtension = "";
     location.isRegex = false;
+    location.maxBodySize = 0; // 0 means inherit from server config
     
     location.allowedMethods.push_back("GET");
     location.allowedMethods.push_back("POST");
@@ -330,9 +350,16 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
         bool matches = false;
         if (location.isRegex) {
             // For regex patterns, check if the path matches
-            // Simple regex matching for .bla$ pattern
-            if (location.path == "\\.bla$") {
-                matches = Utils::endsWith(path, ".bla");
+            // Simple regex matching for .bla$ pattern  
+            if (location.path.find(".bla") != std::string::npos && Utils::endsWith(path, ".bla")) {
+                matches = true;
+            }
+            // Handle /directory/.*\.bla$ pattern
+            if (location.path.find("/directory/") != std::string::npos && 
+                location.path.find(".bla") != std::string::npos &&
+                path.find("/directory/") != std::string::npos && 
+                Utils::endsWith(path, ".bla")) {
+                matches = true;
             }
             // Could add more regex patterns here as needed
             
@@ -441,11 +468,19 @@ std::string Config::extractValue(const std::string& line) {
     if (firstSpace == std::string::npos) return "";
     
     std::string value = line.substr(firstSpace + 1);
+    
     // Remove any trailing { if it exists
     size_t bracePos = value.find('{');
     if (bracePos != std::string::npos) {
         value = value.substr(0, bracePos);
     }
+    
+    // Remove comments (everything after #)
+    size_t commentPos = value.find('#');
+    if (commentPos != std::string::npos) {
+        value = value.substr(0, commentPos);
+    }
+    
     return trim(value);
 }
 

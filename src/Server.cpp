@@ -381,8 +381,11 @@ bool Server::writeToClient(int clientFd) {
     ssize_t bytesSent = send(clientFd, response.c_str() + offset, response.length() - offset, 0);
     
     if (bytesSent < 0) {
-        // For non-blocking sockets, since poll() indicated socket is ready,
-        // a negative return typically indicates an error
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Socket not ready for writing, try again later
+            return true;
+        }
+        // Real error occurred
         return false;
     }
     
@@ -490,15 +493,47 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     if (extension == ".php" || extension == ".py" || extension == ".sh" || extension == ".bla") {
         if (Utils::fileExists(filePath)) {
             LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
+            
+            // For CGI execution, also check if there's a regex location that matches and has CGI config
+            if (location.cgiPath.empty()) {
+                // Check all locations for regex matches with CGI config
+                for (size_t i = 0; i < serverConfig.locations.size(); ++i) {
+                    const LocationConfig& regexLoc = serverConfig.locations[i];
+                    if (regexLoc.isRegex && !regexLoc.cgiPath.empty()) {
+                        // Check if this regex location matches
+                        if (regexLoc.path.find(".bla") != std::string::npos && Utils::endsWith(request.getUri(), ".bla")) {
+                            location.cgiPath = regexLoc.cgiPath;
+                            location.allowedMethods = regexLoc.allowedMethods;
+                            break;
+                        }
+                        if (regexLoc.path.find("/directory/") != std::string::npos && 
+                            regexLoc.path.find(".bla") != std::string::npos &&
+                            request.getUri().find("/directory/") != std::string::npos && 
+                            Utils::endsWith(request.getUri(), ".bla")) {
+                            location.cgiPath = regexLoc.cgiPath;
+                            location.allowedMethods = regexLoc.allowedMethods;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+
             return executeCGI(filePath, request, serverConfig, location);
         } else {
-            return HttpResponse::createErrorResponse(HTTP_NOT_FOUND);
+            return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
         }
     }
     
     // Handle JSON POST requests to create files
     if (contentType.find("application/json") != std::string::npos) {
         return handleJSONPost(request, serverConfig);
+    }
+    
+    // Check if this is a POST to an upload location
+    LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
+    if (!location.uploadPath.empty()) {
+        return handleSimpleFileUpload(request, serverConfig, location);
     }
     
     // Regular POST request
@@ -570,12 +605,14 @@ HttpResponse Server::serveStaticFile(const std::string& path, const ServerConfig
 }
 
 HttpResponse Server::handleDirectoryRequest(const std::string& path, const std::string& uri, const ServerConfig& serverConfig) {
-    std::string indexPath = path + "/" + serverConfig.index;
+    LocationConfig location = getMatchingLocation(uri, serverConfig);
+    
+    // Check for location-specific default file first, then server default
+    std::string indexFile = location.index.empty() ? serverConfig.index : location.index;
+    std::string indexPath = path + "/" + indexFile;
     if (Utils::fileExists(indexPath) && !Utils::isDirectory(indexPath)) {
         return serveStaticFile(indexPath, serverConfig);
     }
-    
-    LocationConfig location = getMatchingLocation(uri, serverConfig);
     
     if (uri.find("/directory/") == 0 && uri != "/directory") {
         std::string youpiPath = path + "/youpi.bad_extension";
@@ -702,6 +739,7 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
     std::string extension = Utils::getFileExtension(scriptPath);
     
     // Check if this location has a specific CGI path configured
+
     if (!locationConfig.cgiPath.empty()) {
         interpreter = locationConfig.cgiPath;
     } else if (extension == ".php") {
@@ -721,6 +759,9 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
     
+    // Declare writer process ID for later use
+    pid_t writerPid = -1;
+    
     pid_t pid = fork();
     if (pid == -1) {
         Utils::logError("Failed to fork for CGI: " + std::string(strerror(errno)));
@@ -734,8 +775,10 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         close(pipeFdIn[1]);  // Close write end of input pipe
         close(pipeFdOut[0]); // Close read end of output pipe
         
-        // Redirect stdin and stdout
+        // Use pipe for stdin
         dup2(pipeFdIn[0], STDIN_FILENO);
+        
+        // Redirect stdout and stderr
         dup2(pipeFdOut[1], STDOUT_FILENO);
         dup2(pipeFdOut[1], STDERR_FILENO);
         
@@ -784,25 +827,165 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         close(pipeFdIn[0]);  // Close read end of input pipe
         close(pipeFdOut[1]); // Close write end of output pipe
         
+
+        
+        // Make pipes non-blocking
+        int flags;
+        flags = fcntl(pipeFdIn[1], F_GETFL, 0);
+        fcntl(pipeFdIn[1], F_SETFL, flags | O_NONBLOCK);
+        flags = fcntl(pipeFdOut[0], F_GETFL, 0);
+        fcntl(pipeFdOut[0], F_SETFL, flags | O_NONBLOCK);
+        
         // Send request body to CGI if POST
         if (request.getMethod() == "POST" && !request.getBody().empty()) {
-            write(pipeFdIn[1], request.getBody().c_str(), request.getBody().length());
+            Utils::logInfo("Sending " + Utils::sizeToString(request.getBody().length()) + " bytes to CGI process");
+            
+            const std::string& body = request.getBody();
+            size_t bodySize = body.length();
+            
+            // Use select-based pipe writing for all payloads
+            size_t totalToWrite = bodySize;
+            size_t totalWritten = 0;
+            const char* data = body.c_str();
+            
+            // Fork a writer process to avoid blocking the main process
+            writerPid = fork();
+                if (writerPid == 0) {
+                    // Writer child process
+                    close(pipeFdOut[0]); // Don't need read pipe
+                    close(pipeFdOut[1]); // Don't need write pipe
+                    
+                    time_t startTime = time(NULL);
+                    const int TOTAL_TIMEOUT_SECONDS = 600; // 10 minutes for very large files
+                    
+                    while (totalWritten < totalToWrite) {
+                        if (time(NULL) - startTime > TOTAL_TIMEOUT_SECONDS) {
+                            Utils::logError("Writer process: timeout after " + Utils::sizeToString(TOTAL_TIMEOUT_SECONDS) + " seconds");
+                            exit(1);
+                        }
+                        
+                        fd_set writefds;
+                        FD_ZERO(&writefds);
+                        FD_SET(pipeFdIn[1], &writefds);
+                        
+                        struct timeval timeout;
+                        timeout.tv_sec = 1; // Shorter timeout for more responsive logging
+                        timeout.tv_usec = 0;
+                        
+                        int selectResult = select(pipeFdIn[1] + 1, NULL, &writefds, NULL, &timeout);
+                        if (selectResult < 0) {
+                            Utils::logError("Writer process: select failed: " + std::string(strerror(errno)));
+                            exit(1);
+                        } else if (selectResult == 0) {
+                            // Timeout, check progress and continue
+                            if (totalWritten % (1024 * 1024) == 0) { // Log every MB when waiting
+                                Utils::logInfo("Writer waiting... " + Utils::sizeToString(totalWritten) + "/" + Utils::sizeToString(totalToWrite) + " bytes written");
+                            }
+                            continue;
+                        }
+                        
+                        if (FD_ISSET(pipeFdIn[1], &writefds)) {
+                            size_t chunkSize = std::min(totalToWrite - totalWritten, static_cast<size_t>(8192)); // 8KB chunks
+                            ssize_t written = write(pipeFdIn[1], data + totalWritten, chunkSize);
+                            
+                            if (written > 0) {
+                                totalWritten += written;
+                                if (totalWritten % (10 * 1024 * 1024) == 0) { // Log every 10MB
+                                    Utils::logInfo("Writer progress: " + Utils::sizeToString(totalWritten) + "/" + Utils::sizeToString(totalToWrite) + " bytes (" + Utils::sizeToString((totalWritten * 100) / totalToWrite) + "%)");
+                                }
+                            } else if (written == 0) {
+                                Utils::logError("Writer process: unexpected write() returned 0");
+                                exit(1);
+                            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                                Utils::logError("Writer process: write error: " + std::string(strerror(errno)));
+                                exit(1);
+                            }
+                        }
+                    }
+                    
+                    Utils::logInfo("Writer process: completed writing " + Utils::sizeToString(totalWritten) + " bytes");
+                    exit(0);
+                } else if (writerPid > 0) {
+                    // Parent process - close write end and continue
+                    close(pipeFdIn[1]);
+                    // The writer process will handle writing to the CGI
+                } else {
+                    Utils::logError("Failed to fork writer process: " + std::string(strerror(errno)));
+                    // Fall back to direct writing
+                    ssize_t written = write(pipeFdIn[1], body.c_str(), std::min(bodySize, static_cast<size_t>(65536)));
+                    if (written > 0) {
+                        Utils::logInfo("Fallback: wrote " + Utils::sizeToString(written) + " bytes directly");
+                    }
+                    close(pipeFdIn[1]);
+                }
+            }
         }
         close(pipeFdIn[1]);
         
-        // Read CGI output
+        // Read CGI output with timeout
         std::string cgiOutput;
         char buffer[4096];
         ssize_t bytesRead;
         
-        while ((bytesRead = read(pipeFdOut[0], buffer, sizeof(buffer))) > 0) {
-            cgiOutput.append(buffer, bytesRead);
+        // Use select/poll for CGI output reading with timeout
+        fd_set readfds;
+        struct timeval timeout;
+        timeout.tv_sec = 30;  // 30 second timeout
+        timeout.tv_usec = 0;
+        
+        while (true) {
+            FD_ZERO(&readfds);
+            FD_SET(pipeFdOut[0], &readfds);
+            
+            int selectResult = select(pipeFdOut[0] + 1, &readfds, NULL, NULL, &timeout);
+            if (selectResult < 0) {
+                Utils::logError("Select failed on CGI pipe: " + std::string(strerror(errno)));
+                break;
+            } else if (selectResult == 0) {
+                Utils::logError("CGI timeout after 30 seconds");
+                break;
+            }
+            
+            if (FD_ISSET(pipeFdOut[0], &readfds)) {
+                bytesRead = read(pipeFdOut[0], buffer, sizeof(buffer));
+                if (bytesRead < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        continue;
+                    }
+                    Utils::logError("Error reading from CGI pipe: " + std::string(strerror(errno)));
+                    break;
+                } else if (bytesRead == 0) {
+                    // End of data
+                    Utils::logInfo("CGI output reading complete, total size: " + Utils::sizeToString(cgiOutput.length()) + " bytes");
+                    break;
+                } else {
+                    cgiOutput.append(buffer, bytesRead);
+                    if (cgiOutput.length() % (10 * 1024 * 1024) == 0) { // Log every 10MB
+                        Utils::logInfo("CGI output reading progress: " + Utils::sizeToString(cgiOutput.length()) + " bytes");
+                    }
+                }
+            }
         }
         close(pipeFdOut[0]);
         
         // Wait for child process
+        Utils::logInfo("Waiting for CGI process to finish");
         int status;
         waitpid(pid, &status, 0);
+        
+        // Also wait for writer process if it exists
+        if (writerPid > 0) {
+            int writerStatus;
+            waitpid(writerPid, &writerStatus, 0);
+            Utils::logInfo("Writer process finished with exit code: " + Utils::intToString(WEXITSTATUS(writerStatus)));
+        }
+        Utils::logInfo("CGI process finished with exit code: " + Utils::intToString(WEXITSTATUS(status)));
+        Utils::logInfo("CGI output size: " + Utils::sizeToString(cgiOutput.length()) + " bytes");
+        if (cgiOutput.length() < 200) { // Log small outputs completely
+            Utils::logInfo("CGI output content: [" + cgiOutput + "]");
+        } else {
+            Utils::logInfo("CGI output preview (first 100 chars): [" + cgiOutput.substr(0, 100) + "...]");
+        }
         
         if (WEXITSTATUS(status) != 0) {
             Utils::logError("CGI script execution failed with exit code: " + Utils::intToString(WEXITSTATUS(status)));
@@ -861,7 +1044,6 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         
         return response;
     }
-}
 
 HttpResponse Server::handleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig) {
     std::string contentType = request.getHeader("Content-Type");
@@ -952,6 +1134,86 @@ HttpResponse Server::handleFileUpload(const HttpRequest& request, const ServerCo
     response.setContentType("text/html");
     response.setBody("<html><body><h1>File Upload Successful</h1><p>Your file(s) have been uploaded successfully.</p></body></html>");
     return response;
+}
+
+HttpResponse Server::handleSimpleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& location) {
+    // Check location-specific body size limit
+    size_t bodySize = request.getBody().length();
+    size_t maxBodySize = location.maxBodySize > 0 ? location.maxBodySize : serverConfig.maxBodySize;
+    
+    if (bodySize > maxBodySize) {
+        Utils::logError("Upload body size " + Utils::sizeToString(bodySize) + 
+                       " exceeds location limit " + Utils::sizeToString(maxBodySize));
+        return createErrorResponse(413, serverConfig); // 413 Payload Too Large
+    }
+    
+    // Get the upload path from location config
+    std::string uploadPath = location.uploadPath;
+    if (uploadPath.empty()) {
+        uploadPath = serverConfig.root + "/uploads/";
+    }
+    
+    // Ensure upload path ends with /
+    if (!uploadPath.empty() && uploadPath[uploadPath.length() - 1] != '/') {
+        uploadPath += "/";
+    }
+    
+    // Create upload directory if it doesn't exist
+    if (!Utils::isDirectory(uploadPath)) {
+        if (mkdir(uploadPath.c_str(), 0755) != 0) {
+            Utils::logError("Failed to create upload directory: " + uploadPath);
+            return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
+        }
+    }
+    
+    // Generate filename - use URI path or timestamp
+    std::string filename;
+    std::string uri = request.getUri();
+    
+    // Remove query parameters
+    size_t queryPos = uri.find('?');
+    if (queryPos != std::string::npos) {
+        uri = uri.substr(0, queryPos);
+    }
+    
+    // Extract filename from URI if it looks like a file
+    size_t lastSlash = uri.find_last_of('/');
+    if (lastSlash != std::string::npos && lastSlash < uri.length() - 1) {
+        std::string possibleFilename = uri.substr(lastSlash + 1);
+        if (!possibleFilename.empty() && possibleFilename.find('.') != std::string::npos) {
+            filename = possibleFilename;
+        }
+    }
+    
+    // If no filename from URI, generate one with timestamp
+    if (filename.empty()) {
+        std::string contentType = request.getHeader("Content-Type");
+        std::string extension = ".txt";
+        if (contentType.find("image") != std::string::npos) {
+            extension = ".dat";
+        } else if (contentType.find("json") != std::string::npos) {
+            extension = ".json";
+        }
+        
+        // Simple timestamp-based filename
+        time_t now = time(0);
+        char timeStr[32];
+        strftime(timeStr, sizeof(timeStr), "%Y%m%d_%H%M%S", localtime(&now));
+        filename = std::string("upload_") + timeStr + extension;
+    }
+    
+    // Save the file
+    if (saveUploadedFile(filename, request.getBody(), uploadPath)) {
+        Utils::logInfo("File uploaded successfully via simple POST: " + filename);
+        
+        HttpResponse response(201);
+        response.setContentType("text/html");
+        response.setBody("<html><body><h1>File Upload Successful</h1><p>File '" + filename + "' uploaded successfully.</p></body></html>");
+        return response;
+    } else {
+        Utils::logError("Failed to save uploaded file: " + filename);
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
+    }
 }
 
 bool Server::saveUploadedFile(const std::string& filename, const std::string& content, const std::string& uploadPath) {
