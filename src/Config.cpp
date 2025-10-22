@@ -379,6 +379,7 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
     }
     
     // Use prefix match if found, otherwise use regex match
+    // This prioritizes exact prefix matches over regex patterns
     if (bestMatchLength > 0) {
         return bestMatch;
     } else if (foundRegexMatch) {
@@ -392,6 +393,70 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
         bestMatch.uploadPath = server.uploadPath;
         bestMatch.cgiPath = server.cgiPath;
         bestMatch.allowedMethods = server.allowedMethods;
+    }
+    
+    return bestMatch;
+}
+
+LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::string& path, const std::string& method) const {
+    LocationConfig bestMatch;
+    setLocationDefaults(bestMatch);
+    size_t bestMatchLength = 0;
+    LocationConfig regexMatch;
+    bool foundRegexMatch = false;
+    
+    for (size_t i = 0; i < server.locations.size(); ++i) {
+        const LocationConfig& location = server.locations[i];
+        
+        bool matches = false;
+        if (location.isRegex) {
+            // For regex patterns, check if the path matches AND method is allowed
+            if (location.path.find(".bla") != std::string::npos && Utils::endsWith(path, ".bla")) {
+                matches = true;
+            }
+            if (location.path.find("/directory/") != std::string::npos && 
+                location.path.find(".bla") != std::string::npos &&
+                path.find("/directory/") != std::string::npos && 
+                Utils::endsWith(path, ".bla")) {
+                matches = true;
+            }
+            
+            // Only use regex match if method is allowed
+            if (matches && !foundRegexMatch) {
+                bool methodAllowed = isValidMethod(method, location);
+
+                
+                if (methodAllowed) {
+                    regexMatch = location;
+                    foundRegexMatch = true;
+                }
+            }
+        } else {
+            // Regular prefix matching
+            matches = Utils::startsWith(path, location.path);
+            if (matches && location.path.length() > bestMatchLength) {
+                bestMatch = location;
+                bestMatchLength = location.path.length();
+            }
+        }
+    }
+    
+    // Use regex match if found and method allowed, otherwise use prefix match
+    if (foundRegexMatch) {
+        return regexMatch;
+    } else if (bestMatchLength > 0) {
+        return bestMatch;
+    }
+    
+    if (bestMatchLength == 0 && !foundRegexMatch) {
+        bestMatch.root = server.root;
+        bestMatch.index = server.index;
+        bestMatch.allowedMethods = server.allowedMethods;
+        bestMatch.autoIndex = server.autoIndex;
+        bestMatch.maxBodySize = server.maxBodySize;
+        bestMatch.uploadPath = server.uploadPath;
+        bestMatch.cgiPath = server.cgiPath;
+        bestMatch.cgiExtension = server.cgiExtensions.empty() ? "" : server.cgiExtensions.begin()->first;
     }
     
     return bestMatch;

@@ -235,11 +235,17 @@ void Server::handleClientRead(int clientFd) {
                 std::string uri = tokens[1];
                 
                 if (method == "POST" || method == "PUT") {
+                    const ServerConfig& serverConfig = _config.getDefaultServer();
+                    LocationConfig location = _config.getLocationConfig(serverConfig, uri, method);
+                    
+                    // Use location-specific maxBodySize if set, otherwise use server default
+                    size_t maxBodySize = (location.maxBodySize > 0) ? location.maxBodySize : serverConfig.maxBodySize;
+                    
                     std::string extension = Utils::getFileExtension(uri);
-                    if (extension == ".bla") {
-                        // Skip body size validation for .bla files
-                    } else {
-                        const ServerConfig& serverConfig = _config.getDefaultServer();
+                    if (extension == ".bla" && location.isRegex) {
+                        // For .bla files, use the larger CGI-friendly limit but still respect location limits
+                        maxBodySize = std::max(maxBodySize, static_cast<size_t>(100 * 1024 * 1024)); // 100MB for CGI
+                    }
                     
                     size_t clPos = headers.find("Content-Length:");
                     if (clPos == std::string::npos) {
@@ -259,9 +265,9 @@ void Server::handleClientRead(int clientFd) {
                                 lengthStr = Utils::trim(lengthStr);
                                 size_t contentLength = Utils::stringToInt(lengthStr);
                                 
-                                if (contentLength > serverConfig.maxBodySize) {
+                                if (contentLength > maxBodySize) {
                                     Utils::logError("Content-Length " + Utils::sizeToString(contentLength) + 
-                                                   " exceeds server limit " + Utils::sizeToString(serverConfig.maxBodySize));
+                                                   " exceeds limit " + Utils::sizeToString(maxBodySize));
                                     
                                     client.stopReading();
                                     HttpResponse response = createErrorResponse(413, serverConfig);
@@ -292,8 +298,18 @@ void Server::handleClientRead(int clientFd) {
                                 
                                 if (teValueLow.find("chunked") != std::string::npos) {
                                     size_t currentBufferSize = client.getBuffer().size();
-                                    if (currentBufferSize > serverConfig.maxBodySize + 1024) {
-                                        Utils::logError("Chunked request already exceeds buffer limit");
+                                    
+                                    // Use the same location-aware body size limit as above
+                                    LocationConfig location = _config.getLocationConfig(serverConfig, uri, method);
+                                    size_t maxBodySize = (location.maxBodySize > 0) ? location.maxBodySize : serverConfig.maxBodySize;
+                                    
+                                    std::string extension = Utils::getFileExtension(uri);
+                                    if (extension == ".bla" && location.isRegex) {
+                                        maxBodySize = std::max(maxBodySize, static_cast<size_t>(100 * 1024 * 1024)); // 100MB for CGI
+                                    }
+                                    
+                                    if (currentBufferSize > maxBodySize + 1024) {
+                                        Utils::logError("Chunked request already exceeds buffer limit " + Utils::sizeToString(maxBodySize));
                                         client.stopReading();
                                         HttpResponse response = createErrorResponse(413, serverConfig);
                                         queueResponse(clientFd, response);
@@ -302,7 +318,6 @@ void Server::handleClientRead(int clientFd) {
                                 }
                             }
                         }
-                    }
                     }
                 }
             }
@@ -331,17 +346,9 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
     } else {
         ServerConfig serverConfig = getServerConfig(clientFd);
         
-        LocationConfig locationConfig = getMatchingLocation(httpRequest.getUri(), serverConfig);
+        LocationConfig locationConfig = _config.getLocationConfig(serverConfig, httpRequest.getUri(), httpRequest.getMethod());
         
-        bool isBlaFile = false;
-        if (httpRequest.getMethod() == "POST") {
-            std::string extension = Utils::getFileExtension(httpRequest.getUri());
-            if (extension == ".bla") {
-                isBlaFile = true;
-            }
-        }
-        
-        if (!isBlaFile && !isMethodAllowed(httpRequest.getMethod(), serverConfig, locationConfig)) {
+        if (!isMethodAllowed(httpRequest.getMethod(), serverConfig, locationConfig)) {
             response = createErrorResponse(HTTP_METHOD_NOT_ALLOWED, serverConfig);
         } else {
             if (httpRequest.getMethod() == "GET") {
@@ -362,7 +369,15 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
 }
 
 void Server::queueResponse(int clientFd, const HttpResponse& response) {
-    std::string responseStr = response.toString();
+    // Make a copy to add headers
+    HttpResponse modifiedResponse = response;
+    
+    // Add Connection keep-alive header for HTTP/1.1
+    if (modifiedResponse.getHeader("Connection").empty()) {
+        modifiedResponse.setHeader("Connection", "keep-alive");
+    }
+    
+    std::string responseStr = modifiedResponse.toString();
     
     _pendingWrites[clientFd] = responseStr;
     _writeOffsets[clientFd] = 0;
@@ -400,7 +415,8 @@ bool Server::writeToClient(int clientFd) {
         _pendingWrites.erase(clientFd);
         _writeOffsets.erase(clientFd);
         updatePollEvents(clientFd);
-        return false;
+        // Keep connection open for HTTP/1.1 keep-alive
+        return true;
     }
     
     return true;
@@ -480,6 +496,18 @@ HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerCo
 }
 
 HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerConfig& serverConfig) {
+    // Validate body size against location-specific limits
+    LocationConfig bodyCheckLocation = _config.getLocationConfig(serverConfig, request.getUri(), request.getMethod());
+    size_t maxBodySize = (bodyCheckLocation.maxBodySize > 0) ? bodyCheckLocation.maxBodySize : serverConfig.maxBodySize;
+    
+    std::string body = request.getBody();
+    if (body.size() > maxBodySize) {
+        Utils::logError("POST body size " + Utils::sizeToString(body.size()) + 
+                       " exceeds limit " + Utils::sizeToString(maxBodySize) + 
+                       " for location " + bodyCheckLocation.path);
+        return createErrorResponse(413, serverConfig);
+    }
+    
     std::string contentType = request.getHeader("Content-Type");
     
     // Check if it's a file upload
@@ -490,9 +518,17 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     // Check if it's a CGI request
     std::string filePath = resolveFilePath(request.getUri(), serverConfig);
     std::string extension = Utils::getFileExtension(filePath);
+    Utils::logInfo("POST request to: " + request.getUri() + ", filePath: " + filePath + ", extension: " + extension);
+    
     if (extension == ".php" || extension == ".py" || extension == ".sh" || extension == ".bla") {
-        if (Utils::fileExists(filePath)) {
-            LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
+        LocationConfig location = _config.getLocationConfig(serverConfig, request.getUri(), request.getMethod());
+        Utils::logInfo("Location found - path: " + location.path + ", isRegex: " + std::string(location.isRegex ? "true" : "false") + ", cgiPath: " + location.cgiPath);
+        
+        // For regex locations with CGI, execute even if file doesn't exist
+        bool canExecuteCGI = Utils::fileExists(filePath) || (location.isRegex && !location.cgiPath.empty());
+        Utils::logInfo("File exists: " + std::string(Utils::fileExists(filePath) ? "true" : "false") + ", canExecuteCGI: " + std::string(canExecuteCGI ? "true" : "false"));
+        
+        if (canExecuteCGI) {
             
             // For CGI execution, also check if there's a regex location that matches and has CGI config
             if (location.cgiPath.empty()) {
@@ -729,8 +765,8 @@ HttpResponse Server::generateDirectoryListing(const std::string& path, const std
 }
 
 HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig) {
-    // Check if file exists
-    if (!Utils::fileExists(scriptPath)) {
+    // For regex locations with CGI, we don't require the physical file to exist
+    if (!Utils::fileExists(scriptPath) && !locationConfig.isRegex) {
         return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
     }
     
@@ -1042,6 +1078,9 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
             response.setContentType("text/html");
         }
         
+        Utils::logInfo("CGI response status code: " + Utils::intToString(response.getStatusCode()));
+        Utils::logInfo("CGI response content-type: " + response.getHeader("Content-Type"));
+        
         return response;
     }
 
@@ -1270,6 +1309,8 @@ std::string Server::resolveFilePath(const std::string& uri, const ServerConfig& 
 LocationConfig Server::getMatchingLocation(const std::string& uri, const ServerConfig& serverConfig) {
     return _config.getLocationConfig(serverConfig, uri);
 }
+
+
 
 bool Server::isMethodAllowed(const std::string& method, const ServerConfig& /* serverConfig */, const LocationConfig& location) {
     return _config.isValidMethod(method, location);

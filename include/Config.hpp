@@ -43,6 +43,7 @@ public:
     ServerConfig getServerByPort(int port) const;
     ServerConfig getServerByName(const std::string& serverName) const;
     LocationConfig getLocationConfig(const ServerConfig& server, const std::string& path) const;
+    LocationConfig getLocationConfig(const ServerConfig& server, const std::string& path, const std::string& method) const;
     
     // Validation
     bool validate() const;
