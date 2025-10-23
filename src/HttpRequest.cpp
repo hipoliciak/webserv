@@ -219,3 +219,7 @@ std::string HttpRequest::decodeChunkedBody(const std::string& rawBody) const {
     
     return decodedBody;
 }
+
+void HttpRequest::clearBody() {
+    _body.clear();
+}

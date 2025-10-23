@@ -38,6 +38,7 @@ public:
     std::string getPath() const;
     bool hasHeader(const std::string& key) const;
     size_t getContentLength() const;
+    void clearBody(); // For memory optimization when body is stored in temp file
 
 private:
     std::string decodeChunkedBody(const std::string& rawBody) const;

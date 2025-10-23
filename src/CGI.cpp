@@ -1,6 +1,8 @@
 #include "../include/CGI.hpp"
 #include "../include/HttpRequest.hpp"
 #include "../include/Utils.hpp"
+#include <fstream>
+#include <sstream>
 
 CGI::CGI() {
     setupCommonEnvVars();
@@ -26,6 +28,22 @@ void CGI::setInterpreter(const std::string& interpreter) {
 
 void CGI::setBody(const std::string& body) {
     _body = body;
+}
+
+void CGI::setBodyFromFile(const std::string& filePath) {
+    std::ifstream file(filePath.c_str(), std::ios::binary);
+    if (!file) {
+        Utils::logError("CGI: Failed to open body file: " + filePath);
+        _body = "";
+        return;
+    }
+    
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    file.close();
+    
+    _body = buffer.str();
+    Utils::logInfo("CGI: Read " + Utils::sizeToString(_body.length()) + " bytes from body file: " + filePath);
 }
 
 void CGI::setEnvironmentVariable(const std::string& key, const std::string& value) {

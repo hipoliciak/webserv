@@ -25,6 +25,41 @@ private:
     std::map<int, int> _clientServerSockets; // Map client fd to server socket fd
     Config _config;
     bool _running;
+    
+    // Asynchronous CGI management
+    struct CgiProcess {
+        pid_t pid;
+        pid_t writerPid;
+        int outputFd;
+        int clientFd;
+        time_t startTime;
+        std::string output;
+        ServerConfig serverConfig;
+    };
+    
+    struct CgiRequest {
+        int clientFd;
+        std::string scriptPath;
+        HttpRequest request;
+        ServerConfig serverConfig;
+        LocationConfig locationConfig;
+    };
+    
+    std::map<int, CgiProcess> _cgiProcesses; // Map output fd to CGI process info
+
+
+    
+    // CGI queuing system
+    struct QueuedCgiRequest {
+        int clientFd;
+        std::string scriptPath;
+        HttpRequest request;
+        ServerConfig serverConfig;
+        LocationConfig locationConfig;
+        std::string bodyFilePath; // Path to temporary file containing request body
+    };
+    std::vector<QueuedCgiRequest> _cgiQueue;
+    static const int MAX_CONCURRENT_CGI_PROCESSES = 1; // Sequential processing for stability
 
 public:
     Server();
@@ -60,6 +95,11 @@ public:
     
     // CGI handling
     HttpResponse executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig);
+    bool startAsyncCGI(int clientFd, const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig, const std::string& bodyFilePath = "");
+    void handleCgiCompletion(int cgiOutputFd);
+    void cleanupCgiProcess(int cgiOutputFd);
+    void processCgiQueue();
+    void queueCgiRequest(int clientFd, const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig);
     
     // Upload handling
     HttpResponse handleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig);
@@ -87,6 +127,12 @@ private:
     void updatePollEvents(int clientFd);
     bool writeToClient(int clientFd);
     ServerConfig getServerConfig(int clientFd) const;
+    
+    // Temporary file utilities for large body handling
+    std::string createTempFile();
+    bool writeBodyToFile(const std::string& body, const std::string& filePath);
+    std::string readBodyFromFile(const std::string& filePath);
+    void cleanupTempFile(const std::string& filePath);
 };
 
 #endif

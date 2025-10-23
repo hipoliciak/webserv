@@ -20,6 +20,7 @@ public:
     void setScriptPath(const std::string& path);
     void setInterpreter(const std::string& interpreter);
     void setBody(const std::string& body);
+    void setBodyFromFile(const std::string& filePath); // For memory-efficient large body handling
     void setEnvironmentVariable(const std::string& key, const std::string& value);
     
     // Environment setup
