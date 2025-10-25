@@ -3,6 +3,7 @@
 #include "../include/Utils.hpp"
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
 
 CGI::CGI() {
     setupCommonEnvVars();
@@ -229,11 +230,34 @@ std::string CGI::execute() {
         
         // Write POST body to stdin pipe if available
         if (!_body.empty()) {
-            ssize_t written = write(stdin_pipe[1], _body.c_str(), _body.length());
-            if (written < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    Utils::logError("Failed to write to CGI stdin: " + std::string(strerror(errno)));
+            size_t totalWritten = 0;
+            size_t bodySize = _body.length();
+            const char* bodyData = _body.c_str();
+            
+            while (totalWritten < bodySize) {
+                ssize_t written = write(stdin_pipe[1], bodyData + totalWritten, bodySize - totalWritten);
+                if (written < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        // Pipe full, wait a bit and retry
+                        usleep(1000); // 1ms
+                        continue;
+                    } else {
+                        Utils::logError("Failed to write to CGI stdin: " + std::string(strerror(errno)));
+                        break;
+                    }
+                } else if (written == 0) {
+                    // Pipe closed unexpectedly
+                    Utils::logError("CGI stdin pipe closed unexpectedly");
+                    break;
+                } else {
+                    totalWritten += written;
                 }
+            }
+            
+            if (totalWritten != bodySize) {
+                Utils::logError("Failed to write complete body to CGI: wrote " + 
+                              Utils::sizeToString(totalWritten) + " of " + 
+                              Utils::sizeToString(bodySize) + " bytes");
             }
         }
         close(stdin_pipe[1]);  // Close stdin pipe to signal EOF

@@ -188,12 +188,8 @@ std::string HttpRequest::decodeChunkedBody(const std::string& rawBody) const {
         
         // If chunk size is 0, we've reached the end
         if (chunkSize == 0) {
-            Utils::logInfo("Reached end chunk (size 0) after " + Utils::sizeToString(chunkNumber) + " chunks, decoded " + Utils::sizeToString(decodedBody.length()) + " bytes total");
+            Utils::logInfo("Chunked decoding complete: " + Utils::sizeToString(chunkNumber) + " chunks, " + Utils::sizeToString(decodedBody.length()) + " bytes total");
             break;
-        }
-        
-        if (chunkNumber <= 5 || chunkNumber % 1000 == 0) {
-            Utils::logInfo("Chunk " + Utils::sizeToString(chunkNumber) + ": size " + Utils::sizeToString(chunkSize) + " bytes");
         }
         
         // Move to start of chunk data

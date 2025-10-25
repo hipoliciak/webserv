@@ -12,6 +12,7 @@ private:
     time_t _lastActivity;
     bool _stopReading;
     size_t _lastBufferSize;
+    bool _chunkedEncodingLogged;
 
 public:
     Client();
@@ -37,9 +38,12 @@ public:
     time_t getLastActivity() const;
     void updateActivity();
     
+    // Chunked encoding logging control
+    bool hasLoggedChunkedEncoding() const;
+    void setChunkedEncodingLogged();
+    
     // Request parsing
     bool parseRequest();
-    size_t findRequestEnd() const;
 };
 
 #endif

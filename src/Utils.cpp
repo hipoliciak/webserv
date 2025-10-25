@@ -232,7 +232,7 @@ namespace Utils {
     
     // Logging utilities
     void log(const std::string& message) {
-        std::cout << "[" << getCurrentTime() << "] " << message << std::endl;
+        std::cerr << "[" << getCurrentTime() << "] " << message << std::endl;
     }
 
     void logError(const std::string& message) {
@@ -240,10 +240,10 @@ namespace Utils {
     }
 
     void logInfo(const std::string& message) {
-        std::cout << "[" << getCurrentTime() << "] INFO: " << message << std::endl;
+        std::cerr << "[" << getCurrentTime() << "] INFO: " << message << std::endl;
     }
 
     void logDebug(const std::string& message) {
-        std::cout << "[" << getCurrentTime() << "] DEBUG: " << message << std::endl;
+        std::cerr << "[" << getCurrentTime() << "] DEBUG: " << message << std::endl;
     }
 }

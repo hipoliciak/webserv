@@ -41,6 +41,14 @@ bool Client::readData() {
     _buffer.append(buffer, bytesRead);
     updateActivity();
 
+    // // Log progress for large data reception
+    // static const size_t LOG_INTERVAL = 10 * 1024 * 1024; // Log every 10MB
+    // if (_buffer.size() > 1024 * 1024 && _buffer.size() / LOG_INTERVAL != _lastBufferSize / LOG_INTERVAL) {
+    //     int displayId = (_clientId > 0) ? _clientId : _fd;
+    //     Utils::logInfo("Receiving data for client " + Utils::intToString(displayId) + 
+    //                   ", buffer size: " + Utils::sizeToString(_buffer.size()) + " bytes");
+    // }
+
     if (!_requestComplete) {
         _requestComplete = parseRequest();
     }
@@ -166,9 +174,8 @@ bool Client::parseRequest() {
                 return false;
             }
             
-            if (chunkCount % 10000 == 0) {
-                Utils::logInfo("Processing chunk " + Utils::sizeToString(chunkCount) + ", buffer size: " + Utils::sizeToString(_buffer.size()));
-            }
+            // Removed chunk-by-chunk logging to reduce log noise
+            // Progress is shown via buffer size logging and final chunked decoding summary
             
             size_t oldCur = cur;
             size_t lineEndPos;
@@ -269,6 +276,7 @@ void Client::clearRequest() {
     _request.clear();
     _requestComplete = false;
     _lastBufferSize = 0;
+    _chunkedEncodingLogged = false;  // Reset for next request
 }
 
 int Client::getFd() const {
@@ -324,4 +332,12 @@ std::string Client::getHeaders() const {
         return _buffer.substr(0, headerEndPos + 4);
     }
     return "";
+}
+
+bool Client::hasLoggedChunkedEncoding() const {
+    return _chunkedEncodingLogged;
+}
+
+void Client::setChunkedEncodingLogged() {
+    _chunkedEncodingLogged = true;
 }

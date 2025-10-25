@@ -34,6 +34,7 @@ private:
         int clientFd;
         time_t startTime;
         std::string output;
+        std::string tempFilePath;  // Track temp file for cleanup
         ServerConfig serverConfig;
     };
     
@@ -59,7 +60,7 @@ private:
         std::string bodyFilePath; // Path to temporary file containing request body
     };
     std::vector<QueuedCgiRequest> _cgiQueue;
-    static const int MAX_CONCURRENT_CGI_PROCESSES = 1; // Sequential processing for stability
+    static const int MAX_CONCURRENT_CGI_PROCESSES = 5; // Increased for better performance
 
 public:
     Server();

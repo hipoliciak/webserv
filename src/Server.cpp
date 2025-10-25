@@ -282,6 +282,12 @@ void Server::handleClientRead(int clientFd) {
                                 lengthStr = Utils::trim(lengthStr);
                                 size_t contentLength = Utils::stringToInt(lengthStr);
                                 
+                                // Log large incoming requests
+                                if (contentLength > 1024 * 1024) {  // > 1MB
+                                    Utils::logInfo("Large POST request incoming for client " + Utils::intToString(clientFd) + 
+                                                  ", Content-Length: " + Utils::sizeToString(contentLength) + " bytes");
+                                }
+                                
                                 if (contentLength > maxBodySize) {
                                     Utils::logError("Content-Length " + Utils::sizeToString(contentLength) + 
                                                    " exceeds limit " + Utils::sizeToString(maxBodySize));
@@ -314,6 +320,11 @@ void Server::handleClientRead(int clientFd) {
                                 std::string teValueLow = Utils::toLower(teValue);
                                 
                                 if (teValueLow.find("chunked") != std::string::npos) {
+                                    if (!client.hasLoggedChunkedEncoding()) {
+                                        Utils::logInfo("Chunked encoding detected for client " + Utils::intToString(clientFd) + 
+                                                      ", receiving data in chunks...");
+                                        client.setChunkedEncodingLogged();
+                                    }
                                     size_t currentBufferSize = client.getBuffer().size();
                                     
                                     // Use the same location-aware body size limit as above
@@ -342,6 +353,7 @@ void Server::handleClientRead(int clientFd) {
     }
     
     if (client.isRequestComplete()) {
+        Utils::logInfo("Request complete for client " + Utils::intToString(clientFd) + ", processing...");
         processHttpRequest(clientFd, client.getRequest());
         client.clearRequest();
     }
@@ -855,9 +867,8 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         // Use pipe for stdin
         dup2(pipeFdIn[0], STDIN_FILENO);
         
-        // Redirect stdout and stderr
+        // Redirect stdout only - let stderr go to parent's stderr
         dup2(pipeFdOut[1], STDOUT_FILENO);
-        dup2(pipeFdOut[1], STDERR_FILENO);
         
         // Close original pipe file descriptors
         close(pipeFdIn[0]);
@@ -954,10 +965,7 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
                             Utils::logError("Writer process: select failed: " + std::string(strerror(errno)));
                             exit(1);
                         } else if (selectResult == 0) {
-                            // Timeout, check progress and continue
-                            if (totalWritten % (1024 * 1024) == 0) { // Log every MB when waiting
-                                Utils::logInfo("Writer waiting... " + Utils::sizeToString(totalWritten) + "/" + Utils::sizeToString(totalToWrite) + " bytes written");
-                            }
+                            // Timeout, continue
                             continue;
                         }
                         
@@ -967,9 +975,6 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
                             
                             if (written > 0) {
                                 totalWritten += written;
-                                if (totalWritten % (10 * 1024 * 1024) == 0) { // Log every 10MB
-                                    Utils::logInfo("Writer progress: " + Utils::sizeToString(totalWritten) + "/" + Utils::sizeToString(totalToWrite) + " bytes (" + Utils::sizeToString((totalWritten * 100) / totalToWrite) + "%)");
-                                }
                             } else if (written == 0) {
                                 Utils::logError("Writer process: unexpected write() returned 0");
                                 exit(1);
@@ -1033,13 +1038,10 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
                     break;
                 } else if (bytesRead == 0) {
                     // End of data
-                    Utils::logInfo("CGI output reading complete, total size: " + Utils::sizeToString(cgiOutput.length()) + " bytes");
+                    Utils::logInfo("CGI output complete, total size: " + Utils::sizeToString(cgiOutput.length()) + " bytes");
                     break;
                 } else {
                     cgiOutput.append(buffer, bytesRead);
-                    if (cgiOutput.length() % (10 * 1024 * 1024) == 0) { // Log every 10MB
-                        Utils::logInfo("CGI output reading progress: " + Utils::sizeToString(cgiOutput.length()) + " bytes");
-                    }
                 }
             }
         }
@@ -1526,7 +1528,7 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
         
         dup2(pipeFdIn[0], STDIN_FILENO);
         dup2(pipeFdOut[1], STDOUT_FILENO);
-        dup2(pipeFdOut[1], STDERR_FILENO);
+        // Don't redirect stderr - let it go to the parent's stderr
         
         close(pipeFdIn[0]);
         close(pipeFdOut[1]);
@@ -1581,30 +1583,58 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
         int flags = fcntl(pipeFdOut[0], F_GETFL, 0);
         fcntl(pipeFdOut[0], F_SETFL, flags | O_NONBLOCK);
         
-        // Send request body to CGI if POST (simplified version)
-        if (request.getMethod() == "POST" && !request.getBody().empty()) {
-            const std::string& body = request.getBody();
-            
+        // Send request body to CGI if POST
+        if (request.getMethod() == "POST" && (!request.getBody().empty() || !bodyFilePath.empty())) {
             // Fork a writer process to avoid blocking
             writerPid = fork();
             if (writerPid == 0) {
                 // Writer child process
                 close(pipeFdOut[0]); // Don't need read pipe
                 
-                size_t totalWritten = 0;
-                const char* data = body.c_str();
-                size_t totalToWrite = body.length();
-                
-                while (totalWritten < totalToWrite) {
-                    ssize_t written = write(pipeFdIn[1], data + totalWritten, totalToWrite - totalWritten);
-                    if (written <= 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            usleep(1000); // Wait 1ms
-                            continue;
-                        }
-                        break;
+                if (!bodyFilePath.empty()) {
+                    // Read from temp file and write to CGI
+                    std::ifstream file(bodyFilePath.c_str(), std::ios::binary);
+                    if (!file.is_open()) {
+                        Utils::logError("Failed to open temp file for CGI input: " + bodyFilePath);
+                        exit(1);
                     }
-                    totalWritten += written;
+                    
+                    char buffer[8192];
+                    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
+                        size_t bytesToWrite = file.gcount();
+                        size_t written = 0;
+                        
+                        while (written < bytesToWrite) {
+                            ssize_t result = write(pipeFdIn[1], buffer + written, bytesToWrite - written);
+                            if (result <= 0) {
+                                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                    usleep(1000); // Wait 1ms
+                                    continue;
+                                }
+                                exit(1);
+                            }
+                            written += result;
+                        }
+                    }
+                    file.close();
+                } else {
+                    // Write from memory body
+                    const std::string& body = request.getBody();
+                    size_t totalWritten = 0;
+                    const char* data = body.c_str();
+                    size_t totalToWrite = body.length();
+                    
+                    while (totalWritten < totalToWrite) {
+                        ssize_t written = write(pipeFdIn[1], data + totalWritten, totalToWrite - totalWritten);
+                        if (written <= 0) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                usleep(1000); // Wait 1ms
+                                continue;
+                            }
+                            break;
+                        }
+                        totalWritten += written;
+                    }
                 }
                 close(pipeFdIn[1]);
                 exit(0);
@@ -1630,10 +1660,13 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
         cgiProc.startTime = time(NULL);
         cgiProc.output = "";
         cgiProc.serverConfig = serverConfig;
+        cgiProc.tempFilePath = bodyFilePath;
         
         _cgiProcesses[pipeFdOut[0]] = cgiProc;
-        
-        Utils::logInfo("Started async CGI process for client " + Utils::intToString(clientFd));
+
+        Utils::logInfo("Started async CGI process for client " + Utils::intToString(clientFd) +
+                      " (active: " + Utils::intToString(_cgiProcesses.size()) +
+                      ", queued: " + Utils::intToString(_cgiQueue.size()) + ")");
         return true;
     }
 }
@@ -1646,7 +1679,7 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
     }
     
     CgiProcess& cgiProc = it->second;
-    Utils::logInfo("Handling CGI completion for client " + Utils::intToString(cgiProc.clientFd) + ", current output size: " + Utils::sizeToString(cgiProc.output.length()));
+    // Handle CGI completion for client
     
     // Sequential read: Read all available data in a loop until EAGAIN or EOF
     char buffer[65536]; // 64KB buffer for faster reading of large responses
@@ -1656,7 +1689,6 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
     // Read all available data in one go to avoid returning to poll loop prematurely
     while ((bytesRead = read(cgiOutputFd, buffer, sizeof(buffer))) > 0) {
         cgiProc.output.append(buffer, bytesRead);
-        Utils::logInfo("CGI read result: " + Utils::intToString(bytesRead) + " bytes, total now: " + Utils::sizeToString(cgiProc.output.length()));
         
         // For very large files, occasionally yield control to prevent blocking
         if (cgiProc.output.length() % (10 * 1024 * 1024) == 0) { // Every 10MB
@@ -1666,11 +1698,10 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
     
     if (bytesRead == 0) {
         shouldFinish = true;
-        Utils::logInfo("CGI output complete, total size: " + Utils::sizeToString(cgiProc.output.length()) + " bytes");
     } else if (bytesRead < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // No more data available right now, continue in next poll cycle
-            Utils::logInfo("CGI read would block, continuing later. Current size: " + Utils::sizeToString(cgiProc.output.length()) + " bytes");
+            // Continue in next poll cycle
             return;
         } else {
             // Real error
@@ -1681,7 +1712,8 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
     
     if (shouldFinish) {
         // EOF - CGI process finished writing
-        Utils::logInfo("CGI output complete, total size: " + Utils::sizeToString(cgiProc.output.length()) + " bytes");
+        Utils::logInfo("CGI output complete for client " + Utils::intToString(cgiProc.clientFd) + 
+                      ", total size: " + Utils::sizeToString(cgiProc.output.length()) + " bytes");
         
         // Wait for CGI process to finish
         int status;
@@ -1773,10 +1805,17 @@ void Server::cleanupCgiProcess(int cgiOutputFd) {
     // Close pipe
     close(cgiOutputFd);
     
+    // Clean up temp file if it exists
+    if (!it->second.tempFilePath.empty()) {
+        cleanupTempFile(it->second.tempFilePath);
+    }
+    
     // Remove from CGI processes map
     _cgiProcesses.erase(it);
     
-    Utils::logInfo("Cleaned up CGI process");
+    Utils::logInfo("Cleaned up CGI process for client " + Utils::intToString(it->second.clientFd) + 
+                  " (active: " + Utils::intToString(_cgiProcesses.size()) + 
+                  ", queued: " + Utils::intToString(_cgiQueue.size()) + ")");
     
     // Process queue to start next CGI if available
     processCgiQueue();
@@ -1811,22 +1850,21 @@ void Server::queueCgiRequest(int clientFd, const std::string& scriptPath,
     }
     
     _cgiQueue.push_back(queuedRequest);
-    std::cout << "Queued CGI request for client " << clientFd << " (queue size: " << _cgiQueue.size() << ")" << std::endl;
+    Utils::logInfo("Queued CGI request for client " + Utils::intToString(clientFd) + " (queue size: " + Utils::intToString(_cgiQueue.size()) + ")");
 }
 
 void Server::processCgiQueue() {
     while (!_cgiQueue.empty() && _cgiProcesses.size() < MAX_CONCURRENT_CGI_PROCESSES) {
         QueuedCgiRequest& queuedRequest = _cgiQueue.front();
         
-        std::cout << "Processing queued CGI request for client " << queuedRequest.clientFd << std::endl;
+        Utils::logInfo("Processing queued CGI request for client " + Utils::intToString(queuedRequest.clientFd) + 
+                      " (remaining queue: " + Utils::intToString(_cgiQueue.size() - 1) + ")");
         
         if (startAsyncCGI(queuedRequest.clientFd, queuedRequest.scriptPath, 
                          queuedRequest.request, queuedRequest.serverConfig, 
                          queuedRequest.locationConfig, queuedRequest.bodyFilePath)) {
-            // Successfully started - clean up temp file and remove from queue
-            if (!queuedRequest.bodyFilePath.empty()) {
-                cleanupTempFile(queuedRequest.bodyFilePath);
-            }
+            // Successfully started - remove from queue
+            // Note: temp file cleanup now handled in cleanupCgiProcess()
             _cgiQueue.erase(_cgiQueue.begin());
         } else {
             // Failed to start - keep in queue and break to avoid infinite loop
