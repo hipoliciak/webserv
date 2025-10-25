@@ -1,0 +1,29 @@
+{
+	"endpoints": [
+		{
+			"method": "GET",
+			"path": "/api/users",
+			"handler": "UserController.listUsers"
+		},
+		{
+			"method": "POST",
+			"path": "/api/users",
+			"handler": "UserController.createUser"
+		},
+		{
+			"method": "GET",
+			"path": "/api/users/:id",
+			"handler": "UserController.getUser"
+		},
+		{
+			"method": "PUT",
+			"path": "/api/users/:id",
+			"handler": "UserController.updateUser"
+		},
+		{
+			"method": "DELETE",
+			"path": "/api/users/:id",
+			"handler": "UserController.deleteUser"
+		}
+	]
+}

@@ -5,7 +5,7 @@ import sys
 import cgi
 
 # Print HTTP headers
-print("Content-Type: text/html")
+print("Content-Type: text/html; charset=utf-8")
 print()  # Empty line required between headers and body
 
 # Print HTML response
@@ -20,7 +20,7 @@ print("""<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <h1>🐍 Python CGI Test</h1>
+    <h1>&#x1F40D; Python CGI Test</h1>
     <div class="info">
         <h2>Request Information</h2>
         <div class="env-var"><strong>Method:</strong> {}</div>
@@ -64,6 +64,6 @@ else:
 
 print("""    </div>
     
-    <p><a href="/">← Back to Home</a></p>
+    <p><a href="/">&larr; Back to Home</a></p>
 </body>
 </html>""")

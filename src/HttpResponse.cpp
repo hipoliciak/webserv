@@ -93,6 +93,21 @@ void HttpResponse::clear() {
 HttpResponse HttpResponse::createErrorResponse(int statusCode) {
     HttpResponse response(statusCode);
     
+    std::string errorMessage;
+    if (statusCode == 413) {
+        errorMessage = "The request payload is too large.";
+    } else if (statusCode == 404) {
+        errorMessage = "The requested resource could not be found.";
+    } else if (statusCode == 403) {
+        errorMessage = "Access to this resource is forbidden.";
+    } else if (statusCode == 405) {
+        errorMessage = "The request method is not allowed for this resource.";
+    } else if (statusCode == 500) {
+        errorMessage = "An internal server error occurred.";
+    } else {
+        errorMessage = "An error occurred.";
+    }
+    
     std::string errorPage = "<!DOCTYPE html>\n"
                            "<html>\n"
                            "<head>\n"
@@ -100,7 +115,7 @@ HttpResponse HttpResponse::createErrorResponse(int statusCode) {
                            "</head>\n"
                            "<body>\n"
                            "    <h1>" + Utils::intToString(statusCode) + " " + getStatusMessage(statusCode) + "</h1>\n"
-                           "    <p>The requested resource could not be found or an error occurred.</p>\n"
+                           "    <p>" + errorMessage + "</p>\n"
                            "    <hr>\n"
                            "    <small>webserv/1.0</small>\n"
                            "</body>\n"
@@ -120,9 +135,6 @@ HttpResponse HttpResponse::createFileResponse(const std::string& filePath) {
     }
     
     std::string content = Utils::readFile(filePath);
-    if (content.empty()) {
-        return createErrorResponse(500);
-    }
     
     std::string mimeType = getMimeType(filePath);
     response.setContentType(mimeType);

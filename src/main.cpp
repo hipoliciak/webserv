@@ -13,6 +13,7 @@ void signalHandler(int signal) {
         if (g_server) {
             g_server->stop();
         }
+		std::cout << "Server stopped." << std::endl;
     }
 }
 
@@ -37,7 +38,7 @@ int main(int argc, char **argv) {
         
         // Create and initialize server
         Server server(config);
-        g_server = &server;  // Set global pointer for signal handler
+        g_server = &server;
         
         if (!server.initialize()) {
             std::cerr << "Error: Failed to initialize server" << std::endl;

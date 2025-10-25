@@ -1,6 +1,9 @@
 #include "../include/CGI.hpp"
 #include "../include/HttpRequest.hpp"
 #include "../include/Utils.hpp"
+#include <fstream>
+#include <sstream>
+#include <unistd.h>
 
 CGI::CGI() {
     setupCommonEnvVars();
@@ -28,12 +31,27 @@ void CGI::setBody(const std::string& body) {
     _body = body;
 }
 
+void CGI::setBodyFromFile(const std::string& filePath) {
+    std::ifstream file(filePath.c_str(), std::ios::binary);
+    if (!file) {
+        Utils::logError("CGI: Failed to open body file: " + filePath);
+        _body = "";
+        return;
+    }
+    
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    file.close();
+    
+    _body = buffer.str();
+    Utils::logInfo("CGI: Read " + Utils::sizeToString(_body.length()) + " bytes from body file: " + filePath);
+}
+
 void CGI::setEnvironmentVariable(const std::string& key, const std::string& value) {
     _envVars[key] = value;
 }
 
 void CGI::setupEnvironment(const HttpRequest& request, const std::string& serverName, int serverPort) {
-    // Required CGI environment variables according to RFC 3875
     _envVars["REQUEST_METHOD"] = request.getMethod();
     _envVars["REQUEST_URI"] = request.getUri();
     _envVars["QUERY_STRING"] = request.getUri().find('?') != std::string::npos ? 
@@ -44,12 +62,23 @@ void CGI::setupEnvironment(const HttpRequest& request, const std::string& server
     _envVars["SERVER_PORT"] = Utils::intToString(serverPort);
     _envVars["SERVER_PROTOCOL"] = request.getVersion();
     _envVars["GATEWAY_INTERFACE"] = "CGI/1.1";
-    _envVars["SCRIPT_NAME"] = extractFilename(_scriptPath);
-    _envVars["SCRIPT_FILENAME"] = _scriptPath;
-    _envVars["PATH_INFO"] = "";
+    _envVars["SCRIPT_NAME"] = request.getUri();
+    
+    // Ensure SCRIPT_FILENAME is absolute path
+    std::string absoluteScriptPath = _scriptPath;
+    if (!absoluteScriptPath.empty() && absoluteScriptPath[0] != '/') {
+        char* cwd = getcwd(NULL, 0);
+        if (cwd) {
+            absoluteScriptPath = std::string(cwd) + "/" + _scriptPath;
+            free(cwd);
+        }
+    }
+    _envVars["SCRIPT_FILENAME"] = absoluteScriptPath;
+    _envVars["PATH_INFO"] = request.getUri();
     _envVars["PATH_TRANSLATED"] = "";
-    _envVars["REMOTE_ADDR"] = "127.0.0.1"; // TODO: Get actual client IP
+    _envVars["REMOTE_ADDR"] = "127.0.0.1";
     _envVars["REMOTE_HOST"] = "";
+    _envVars["REDIRECT_STATUS"] = "200"; // Required for PHP CGI security
     _envVars["AUTH_TYPE"] = "";
     _envVars["REMOTE_USER"] = "";
     _envVars["REMOTE_IDENT"] = "";
@@ -65,18 +94,34 @@ void CGI::setupEnvironment(const HttpRequest& request, const std::string& server
 }
 
 char** CGI::createEnvArray() const {
-    char** envArray = new char*[_envVars.size() + 1];
-    size_t i = 0;
-    
-    for (std::map<std::string, std::string>::const_iterator it = _envVars.begin(); 
-         it != _envVars.end(); ++it, ++i) {
-        std::string envVar = it->first + "=" + it->second;
-        envArray[i] = new char[envVar.length() + 1];
-        strcpy(envArray[i], envVar.c_str());
+    char** envArray = NULL;
+    try {
+        envArray = new char*[_envVars.size() + 1];
+        size_t i = 0;
+        
+        for (std::map<std::string, std::string>::const_iterator it = _envVars.begin(); 
+             it != _envVars.end(); ++it, ++i) {
+            std::string envVar = it->first + "=" + it->second;
+            try {
+                envArray[i] = new char[envVar.length() + 1];
+                strcpy(envArray[i], envVar.c_str());
+            } catch (const std::bad_alloc& e) {
+                // Clean up previously allocated strings
+                for (size_t j = 0; j < i; ++j) {
+                    delete[] envArray[j];
+                }
+                delete[] envArray;
+                Utils::logError("Memory allocation failed in createEnvArray");
+                return NULL;
+            }
+        }
+        
+        envArray[i] = NULL;
+        return envArray;
+    } catch (const std::bad_alloc& e) {
+        Utils::logError("Memory allocation failed in createEnvArray");
+        return NULL;
     }
-    
-    envArray[i] = NULL;
-    return envArray;
 }
 
 void CGI::freeEnvArray(char** envArray) const {
@@ -94,50 +139,71 @@ std::string CGI::execute() {
         return "";
     }
     
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
-        Utils::logError("Failed to create pipe for CGI");
+    int stdout_pipe[2];
+    int stdin_pipe[2];
+    
+    if (pipe(stdout_pipe) == -1 || pipe(stdin_pipe) == -1) {
+        Utils::logError("Failed to create pipes for CGI");
+        return "";
+    }
+    
+    // Set up environment before forking
+    char** envArray = createEnvArray();
+    if (!envArray) {
+        Utils::logError("Failed to create environment array for CGI");
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
         return "";
     }
     
     pid_t pid = fork();
     if (pid == -1) {
         Utils::logError("Failed to fork for CGI execution");
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+        freeEnvArray(envArray);
         return "";
     }
     
     if (pid == 0) {
         // Child process
-        close(pipefd[0]); // Close read end
+        close(stdout_pipe[0]);  // Close read end of stdout pipe
+        close(stdin_pipe[1]);   // Close write end of stdin pipe
         
         // Redirect stdout to pipe
-        if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
+        if (dup2(stdout_pipe[1], STDOUT_FILENO) == -1) {
             Utils::logError("Failed to redirect stdout in CGI child");
+            freeEnvArray(envArray);
             exit(1);
         }
-        close(pipefd[1]);
         
-        // Change directory to script directory
+        // Redirect stdin to pipe
+        if (dup2(stdin_pipe[0], STDIN_FILENO) == -1) {
+            Utils::logError("Failed to redirect stdin in CGI child");
+            freeEnvArray(envArray);
+            exit(1);
+        }
+        
+        close(stdout_pipe[1]);
+        close(stdin_pipe[0]);
+        
         if (chdir(_scriptDir.c_str()) == -1) {
             Utils::logError("Failed to change directory for CGI execution");
+            freeEnvArray(envArray);
             exit(1);
         }
         
-        // Set up environment
-        char** envArray = createEnvArray();
-        
-        // Execute the script
         if (_interpreter.empty()) {
-            // Try to execute script directly
             char* args[] = { 
                 const_cast<char*>(_scriptPath.c_str()), 
                 NULL 
             };
             execve(_scriptPath.c_str(), args, envArray);
         } else {
-            // Use interpreter
             char* args[] = { 
                 const_cast<char*>(_interpreter.c_str()), 
                 const_cast<char*>(_scriptPath.c_str()), 
@@ -152,29 +218,97 @@ std::string CGI::execute() {
         exit(1);
     } else {
         // Parent process
-        close(pipefd[1]); // Close write end
+        close(stdout_pipe[1]);  // Close write end of stdout pipe
+        close(stdin_pipe[0]);   // Close read end of stdin pipe
         
-        // Send body to CGI if needed (for POST requests)
+        // Make pipes non-blocking
+        int flags;
+        flags = fcntl(stdin_pipe[1], F_GETFL, 0);
+        fcntl(stdin_pipe[1], F_SETFL, flags | O_NONBLOCK);
+        flags = fcntl(stdout_pipe[0], F_GETFL, 0);
+        fcntl(stdout_pipe[0], F_SETFL, flags | O_NONBLOCK);
+        
+        // Write POST body to stdin pipe if available
         if (!_body.empty()) {
-            // We should use another pipe for stdin, but for simplicity we'll skip this for now
-            // TODO: Implement proper stdin handling for POST data
+            size_t totalWritten = 0;
+            size_t bodySize = _body.length();
+            const char* bodyData = _body.c_str();
+            
+            while (totalWritten < bodySize) {
+                ssize_t written = write(stdin_pipe[1], bodyData + totalWritten, bodySize - totalWritten);
+                if (written < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        // Pipe full, wait a bit and retry
+                        usleep(1000); // 1ms
+                        continue;
+                    } else {
+                        Utils::logError("Failed to write to CGI stdin: " + std::string(strerror(errno)));
+                        break;
+                    }
+                } else if (written == 0) {
+                    // Pipe closed unexpectedly
+                    Utils::logError("CGI stdin pipe closed unexpectedly");
+                    break;
+                } else {
+                    totalWritten += written;
+                }
+            }
+            
+            if (totalWritten != bodySize) {
+                Utils::logError("Failed to write complete body to CGI: wrote " + 
+                              Utils::sizeToString(totalWritten) + " of " + 
+                              Utils::sizeToString(bodySize) + " bytes");
+            }
         }
+        close(stdin_pipe[1]);  // Close stdin pipe to signal EOF
         
-        // Read output from CGI
         std::string output;
         char buffer[BUFFER_SIZE];
         ssize_t bytesRead;
         
-        while ((bytesRead = read(pipefd[0], buffer, BUFFER_SIZE - 1)) > 0) {
-            buffer[bytesRead] = '\0';
-            output += buffer;
+        // Use select for reading with timeout
+        fd_set readfds;
+        struct timeval timeout;
+        timeout.tv_sec = 30;  // 30 second timeout
+        timeout.tv_usec = 0;
+        
+        while (true) {
+            FD_ZERO(&readfds);
+            FD_SET(stdout_pipe[0], &readfds);
+            
+            int selectResult = select(stdout_pipe[0] + 1, &readfds, NULL, NULL, &timeout);
+            if (selectResult < 0) {
+                Utils::logError("Select failed on CGI stdout pipe: " + std::string(strerror(errno)));
+                break;
+            } else if (selectResult == 0) {
+                Utils::logError("CGI timeout after 30 seconds");
+                break;
+            }
+            
+            if (FD_ISSET(stdout_pipe[0], &readfds)) {
+                bytesRead = read(stdout_pipe[0], buffer, BUFFER_SIZE - 1);
+                if (bytesRead < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        continue;
+                    }
+                    Utils::logError("Error reading from CGI stdout: " + std::string(strerror(errno)));
+                    break;
+                } else if (bytesRead == 0) {
+                    // End of data
+                    break;
+                } else {
+                    buffer[bytesRead] = '\0';
+                    output += buffer;
+                }
+            }
         }
         
-        close(pipefd[0]);
+        close(stdout_pipe[0]);
         
-        // Wait for child to finish
         int status;
         waitpid(pid, &status, 0);
+        
+        freeEnvArray(envArray);
         
         if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
             Utils::logInfo("CGI script executed successfully");

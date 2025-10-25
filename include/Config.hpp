@@ -16,7 +16,7 @@ struct ServerConfig {
     bool autoIndex;
     std::string uploadPath;
     std::string cgiPath;
-    std::map<std::string, std::string> cgiExtensions; // extension -> interpreter
+    std::map<std::string, std::string> cgiExtensions;
 };
 
 class Config {
@@ -43,6 +43,7 @@ public:
     ServerConfig getServerByPort(int port) const;
     ServerConfig getServerByName(const std::string& serverName) const;
     LocationConfig getLocationConfig(const ServerConfig& server, const std::string& path) const;
+    LocationConfig getLocationConfig(const ServerConfig& server, const std::string& path, const std::string& method) const;
     
     // Validation
     bool validate() const;
@@ -54,7 +55,6 @@ public:
     bool isCGIEnabled(const ServerConfig& server) const;
     
     // Utilities
-    void print() const;
     static std::vector<std::string> split(const std::string& str, char delimiter);
     static std::string trim(const std::string& str);
     static std::string extractValue(const std::string& line);

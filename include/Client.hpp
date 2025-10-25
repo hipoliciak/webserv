@@ -10,6 +10,9 @@ private:
     std::string _request;
     bool _requestComplete;
     time_t _lastActivity;
+    bool _stopReading;
+    size_t _lastBufferSize;
+    bool _chunkedEncodingLogged;
 
 public:
     Client();
@@ -22,6 +25,12 @@ public:
     bool isRequestComplete() const;
     void clearRequest();
     
+    // Reading control
+    void stopReading();
+    bool shouldStopReading() const;
+    bool areHeadersComplete() const;
+    std::string getHeaders() const;
+    
     // Getters/Setters
     int getFd() const;
     const std::string& getRequest() const;
@@ -29,9 +38,12 @@ public:
     time_t getLastActivity() const;
     void updateActivity();
     
+    // Chunked encoding logging control
+    bool hasLoggedChunkedEncoding() const;
+    void setChunkedEncodingLogged();
+    
     // Request parsing
     bool parseRequest();
-    size_t findRequestEnd() const;
 };
 
 #endif

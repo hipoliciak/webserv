@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Upload - Port 8082</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 40px; 
+            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%);
+            color: #333;
+            min-height: 90vh;
+        }
+        .container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            background: rgba(255,255,255,0.9); 
+            padding: 30px; 
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        h1 { color: #d63384; text-align: center; font-size: 2.5em; }
+        .server-badge { 
+            background: #fd7e14; 
+            color: white; 
+            padding: 10px 20px; 
+            border-radius: 25px; 
+            display: inline-block; 
+            margin: 20px 0;
+        }
+        .upload-btn {
+            background: #d63384;
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .nav-link {
+            color: #d63384;
+            text-decoration: none;
+            font-weight: bold;
+            margin: 0 15px;
+            padding: 10px 20px;
+            border: 2px solid #d63384;
+            border-radius: 5px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📤 File Upload</h1>
+        <div class="server-badge">Port 8082 - Upload & Download Hub</div>
+        
+        <p>Upload your files to the server using the form below. Files will be stored securely and can be accessed later.</p>
+        
+        <main>
+            <section class="info">
+                <h2>File Upload Form</h2>
+                <form id="upload-form" method="POST" enctype="multipart/form-data" action="/upload/" style="background: #f8f9fa; padding: 30px; border-radius: 10px;">
+                    <div style="margin-bottom: 20px;">
+                        <label for="file" style="display: block; margin-bottom: 10px; font-weight: bold;">Select file to upload:</label>
+                        <input type="file" id="file" name="file" style="padding: 10px; border: 2px dashed #3498db; border-radius: 5px; width: 100%;">
+                    </div>
+                    
+                    <div style="margin-bottom: 20px;">
+                        <label for="description" style="display: block; margin-bottom: 10px; font-weight: bold;">Description (optional):</label>
+                        <textarea id="description" name="description" rows="4" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;" placeholder="Enter a description for your file..."></textarea>
+                    </div>
+                    
+                    <input type="submit" value="Upload File" class="upload-btn">
+                </form>
+            </section>
+            
+            <section class="features">
+                <h2>Upload Information</h2>
+                <ul>
+                    <li>📁 Maximum file size: 100MB</li>
+                    <li>📋 Supported formats: All file types</li>
+                    <li>🔒 Secure upload handling</li>
+                    <li>⚡ Storage location: /uploads/ directory</li>
+                </ul>
+            </section>
+            
+            <section class="links">
+                <h2>Navigation</h2>
+                <div style="text-align: center;">
+                    <a href="/" class="nav-link">🏠 Home</a>
+                    <a href="/uploads/" class="nav-link">📂 View Uploads</a>
+                    <a href="/files/" class="nav-link">📁 Browse Files</a>
+                </div>
+            </section>
+        </main>
+        
+        <footer>
+            <p>&copy; 2025 webserv project upload test</p>
+        </footer>
+    </div>
+    
+    <script src="js/main.js"></script>
+</body>
+</html>

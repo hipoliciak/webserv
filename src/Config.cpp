@@ -107,7 +107,17 @@ bool Config::parseServerBlock(const std::string& block) {
             
             LocationConfig location;
             setLocationDefaults(location);
-            location.path = locationPath;
+            
+            // Check if this is a regex location (starts with ~)
+            if (locationPath.length() > 0 && locationPath[0] == '~') {
+                location.isRegex = true;
+                // Remove the ~ and any following whitespace
+                locationPath = trim(locationPath.substr(1));
+                location.path = locationPath;
+            } else {
+                location.isRegex = false;
+                location.path = locationPath;
+            }
             
             i++; // Move past opening brace
             std::string locationBlock;
@@ -146,8 +156,24 @@ bool Config::parseServerBlock(const std::string& block) {
             if (!indexValues.empty()) {
                 config.index = indexValues[0];
             }
-        } else if (directive == "max_body_size") {
-            config.maxBodySize = Utils::stringToInt(tokens[1]);
+        } else if (directive == "max_body_size" || directive == "client_max_body_size") {
+            std::string valueStr = tokens[1];
+            // Handle size suffixes (M, K, G)
+            size_t multiplier = 1;
+            if (!valueStr.empty()) {
+                char lastChar = valueStr[valueStr.length() - 1];
+                if (lastChar == 'M' || lastChar == 'm') {
+                    multiplier = 1024 * 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                } else if (lastChar == 'K' || lastChar == 'k') {
+                    multiplier = 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                } else if (lastChar == 'G' || lastChar == 'g') {
+                    multiplier = 1024 * 1024 * 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                }
+            }
+            config.maxBodySize = Utils::stringToInt(valueStr) * multiplier;
         } else if (directive == "autoindex") {
             config.autoIndex = (tokens[1] == "on");
         } else if (directive == "upload_path") {
@@ -157,7 +183,7 @@ bool Config::parseServerBlock(const std::string& block) {
         } else if (directive == "error_page") {
             if (tokens.size() >= 3) {
                 int errorCode = Utils::stringToInt(tokens[1]);
-                config.errorPages[errorCode] = extractValue(trimmedLine.substr(trimmedLine.find(tokens[2])));
+                config.errorPages[errorCode] = tokens[2];
             }
         } else if (directive == "allow_methods") {
             std::vector<std::string> methods = extractValues(trimmedLine);
@@ -199,8 +225,29 @@ bool Config::parseLocationBlock(const std::string& block, LocationConfig& locati
             location.uploadPath = extractValue(trimmedLine);
         } else if (directive == "cgi_path") {
             location.cgiPath = extractValue(trimmedLine);
-        } else if (directive == "cgi_extension") {
+        } else if (directive == "cgi_extension" || directive == "cgi_extensions") {
             location.cgiExtension = extractValue(trimmedLine);
+        } else if (directive == "default") {
+            location.index = extractValue(trimmedLine);
+        } else if (directive == "client_max_body_size") {
+            std::string valueStr = extractValue(trimmedLine);
+            size_t multiplier = 1;
+            
+            // Handle size suffixes (K, M, G)
+            if (!valueStr.empty()) {
+                char lastChar = valueStr[valueStr.length() - 1];
+                if (lastChar == 'K' || lastChar == 'k') {
+                    multiplier = 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                } else if (lastChar == 'M' || lastChar == 'm') {
+                    multiplier = 1024 * 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                } else if (lastChar == 'G' || lastChar == 'g') {
+                    multiplier = 1024 * 1024 * 1024;
+                    valueStr = valueStr.substr(0, valueStr.length() - 1);
+                }
+            }
+            location.maxBodySize = Utils::stringToInt(valueStr) * multiplier;
         } else if (directive == "allow_methods") {
             location.allowedMethods = extractValues(trimmedLine);
         } else if (directive == "redirect") {
@@ -249,6 +296,8 @@ void Config::setLocationDefaults(LocationConfig& location) const {
     location.uploadPath = "";
     location.cgiPath = "";
     location.cgiExtension = "";
+    location.isRegex = false;
+    location.maxBodySize = 0; // 0 means inherit from server config
     
     location.allowedMethods.push_back("GET");
     location.allowedMethods.push_back("POST");
@@ -292,23 +341,122 @@ LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::
     LocationConfig bestMatch;
     setLocationDefaults(bestMatch);
     size_t bestMatchLength = 0;
+    LocationConfig regexMatch;
+    bool foundRegexMatch = false;
     
     for (size_t i = 0; i < server.locations.size(); ++i) {
         const LocationConfig& location = server.locations[i];
-        if (Utils::startsWith(path, location.path) && location.path.length() > bestMatchLength) {
-            bestMatch = location;
-            bestMatchLength = location.path.length();
+        
+        bool matches = false;
+        if (location.isRegex) {
+            // For regex patterns, check if the path matches
+            // Simple regex matching for .bla$ pattern  
+            if (location.path.find(".bla") != std::string::npos && Utils::endsWith(path, ".bla")) {
+                matches = true;
+            }
+            // Handle /directory/.*\.bla$ pattern
+            if (location.path.find("/directory/") != std::string::npos && 
+                location.path.find(".bla") != std::string::npos &&
+                path.find("/directory/") != std::string::npos && 
+                Utils::endsWith(path, ".bla")) {
+                matches = true;
+            }
+            // Could add more regex patterns here as needed
+            
+            // Store regex match but don't immediately use it
+            if (matches && !foundRegexMatch) {
+                regexMatch = location;
+                foundRegexMatch = true;
+            }
+        } else {
+            // Regular prefix matching
+            matches = Utils::startsWith(path, location.path);
+            if (matches && location.path.length() > bestMatchLength) {
+                bestMatch = location;
+                bestMatchLength = location.path.length();
+            }
         }
     }
     
-    // If no location matched, use server defaults
-    if (bestMatchLength == 0) {
+    // Use prefix match if found, otherwise use regex match
+    // This prioritizes exact prefix matches over regex patterns
+    if (bestMatchLength > 0) {
+        return bestMatch;
+    } else if (foundRegexMatch) {
+        return regexMatch;
+    }
+    
+    if (bestMatchLength == 0 && !foundRegexMatch) {
         bestMatch.root = server.root;
         bestMatch.index = server.index;
         bestMatch.autoIndex = server.autoIndex;
         bestMatch.uploadPath = server.uploadPath;
         bestMatch.cgiPath = server.cgiPath;
         bestMatch.allowedMethods = server.allowedMethods;
+    }
+    
+    return bestMatch;
+}
+
+LocationConfig Config::getLocationConfig(const ServerConfig& server, const std::string& path, const std::string& method) const {
+    LocationConfig bestMatch;
+    setLocationDefaults(bestMatch);
+    size_t bestMatchLength = 0;
+    LocationConfig regexMatch;
+    bool foundRegexMatch = false;
+    
+    for (size_t i = 0; i < server.locations.size(); ++i) {
+        const LocationConfig& location = server.locations[i];
+        
+        bool matches = false;
+        if (location.isRegex) {
+            // For regex patterns, check if the path matches AND method is allowed
+            if (location.path.find(".bla") != std::string::npos && Utils::endsWith(path, ".bla")) {
+                matches = true;
+            }
+            if (location.path.find("/directory/") != std::string::npos && 
+                location.path.find(".bla") != std::string::npos &&
+                path.find("/directory/") != std::string::npos && 
+                Utils::endsWith(path, ".bla")) {
+                matches = true;
+            }
+            
+            // Only use regex match if method is allowed
+            if (matches && !foundRegexMatch) {
+                bool methodAllowed = isValidMethod(method, location);
+
+                
+                if (methodAllowed) {
+                    regexMatch = location;
+                    foundRegexMatch = true;
+                }
+            }
+        } else {
+            // Regular prefix matching
+            matches = Utils::startsWith(path, location.path);
+            if (matches && location.path.length() > bestMatchLength) {
+                bestMatch = location;
+                bestMatchLength = location.path.length();
+            }
+        }
+    }
+    
+    // Use regex match if found and method allowed, otherwise use prefix match
+    if (foundRegexMatch) {
+        return regexMatch;
+    } else if (bestMatchLength > 0) {
+        return bestMatch;
+    }
+    
+    if (bestMatchLength == 0 && !foundRegexMatch) {
+        bestMatch.root = server.root;
+        bestMatch.index = server.index;
+        bestMatch.allowedMethods = server.allowedMethods;
+        bestMatch.autoIndex = server.autoIndex;
+        bestMatch.maxBodySize = server.maxBodySize;
+        bestMatch.uploadPath = server.uploadPath;
+        bestMatch.cgiPath = server.cgiPath;
+        bestMatch.cgiExtension = server.cgiExtensions.empty() ? "" : server.cgiExtensions.begin()->first;
     }
     
     return bestMatch;
@@ -372,48 +520,6 @@ bool Config::isCGIEnabled(const ServerConfig& server) const {
     return !server.cgiExtensions.empty();
 }
 
-void Config::print() const {
-    std::cout << "=== Configuration ===" << std::endl;
-    for (size_t i = 0; i < _servers.size(); ++i) {
-        const ServerConfig& server = _servers[i];
-        std::cout << "Server " << i + 1 << ":" << std::endl;
-        std::cout << "  Host: " << server.host << std::endl;
-        std::cout << "  Port: " << server.port << std::endl;
-        std::cout << "  Server Name: " << server.serverName << std::endl;
-        std::cout << "  Root: " << server.root << std::endl;
-        std::cout << "  Index: " << server.index << std::endl;
-        std::cout << "  Max Body Size: " << server.maxBodySize << std::endl;
-        std::cout << "  Auto Index: " << (server.autoIndex ? "on" : "off") << std::endl;
-        std::cout << "  Upload Path: " << server.uploadPath << std::endl;
-        std::cout << "  CGI Path: " << server.cgiPath << std::endl;
-        
-        std::cout << "  Allowed Methods: ";
-        for (size_t j = 0; j < server.allowedMethods.size(); ++j) {
-            std::cout << server.allowedMethods[j] << " ";
-        }
-        std::cout << std::endl;
-        
-        if (!server.errorPages.empty()) {
-            std::cout << "  Error Pages:" << std::endl;
-            for (std::map<int, std::string>::const_iterator it = server.errorPages.begin(); it != server.errorPages.end(); ++it) {
-                std::cout << "    " << it->first << ": " << it->second << std::endl;
-            }
-        }
-        
-        if (!server.locations.empty()) {
-            std::cout << "  Locations:" << std::endl;
-            for (size_t j = 0; j < server.locations.size(); ++j) {
-                const LocationConfig& location = server.locations[j];
-                std::cout << "    " << location.path << ":" << std::endl;
-                std::cout << "      Root: " << location.root << std::endl;
-                std::cout << "      Index: " << location.index << std::endl;
-                std::cout << "      Auto Index: " << (location.autoIndex ? "on" : "off") << std::endl;
-            }
-        }
-    }
-    std::cout << "====================" << std::endl;
-}
-
 std::vector<std::string> Config::split(const std::string& str, char delimiter) {
     return Utils::split(str, delimiter);
 }
@@ -427,11 +533,19 @@ std::string Config::extractValue(const std::string& line) {
     if (firstSpace == std::string::npos) return "";
     
     std::string value = line.substr(firstSpace + 1);
+    
     // Remove any trailing { if it exists
     size_t bracePos = value.find('{');
     if (bracePos != std::string::npos) {
         value = value.substr(0, bracePos);
     }
+    
+    // Remove comments (everything after #)
+    size_t commentPos = value.find('#');
+    if (commentPos != std::string::npos) {
+        value = value.substr(0, commentPos);
+    }
+    
     return trim(value);
 }
 

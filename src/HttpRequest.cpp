@@ -47,6 +47,14 @@ bool HttpRequest::parse(const std::string& rawRequest) {
         }
     }
     
+    // Check if Transfer-Encoding is chunked and decode if necessary
+    std::string transferEncoding = getHeader("transfer-encoding");
+    if (!transferEncoding.empty() && Utils::toLower(transferEncoding).find("chunked") != std::string::npos) {
+        size_t originalSize = _body.length();
+        _body = decodeChunkedBody(_body);
+        Utils::logInfo("Chunked decoding: " + Utils::sizeToString(originalSize) + " raw bytes -> " + Utils::sizeToString(_body.length()) + " decoded bytes");
+    }
+    
     // Parse query string from URI
     parseQueryString(_uri);
     
@@ -143,23 +151,71 @@ size_t HttpRequest::getContentLength() const {
     return contentLength.empty() ? 0 : Utils::stringToInt(contentLength);
 }
 
-void HttpRequest::print() const {
-    std::cout << "=== HTTP Request ===" << std::endl;
-    std::cout << "Method: " << _method << std::endl;
-    std::cout << "URI: " << _uri << std::endl;
-    std::cout << "Version: " << _version << std::endl;
-    std::cout << "Headers:" << std::endl;
-    for (std::map<std::string, std::string>::const_iterator it = _headers.begin(); it != _headers.end(); ++it) {
-        std::cout << "  " << it->first << ": " << it->second << std::endl;
-    }
-    if (!_queryParams.empty()) {
-        std::cout << "Query Parameters:" << std::endl;
-        for (std::map<std::string, std::string>::const_iterator it = _queryParams.begin(); it != _queryParams.end(); ++it) {
-            std::cout << "  " << it->first << "=" << it->second << std::endl;
+std::string HttpRequest::decodeChunkedBody(const std::string& rawBody) const {
+    std::string decodedBody;
+    size_t pos = 0;
+    size_t chunkNumber = 0;
+    
+    Utils::logInfo("Starting chunked body decoding, raw body size: " + Utils::sizeToString(rawBody.length()));
+    
+    while (pos < rawBody.length()) {
+        chunkNumber++;
+        // Find the end of the chunk size line
+        size_t lineEnd = rawBody.find('\n', pos);
+        if (lineEnd == std::string::npos) {
+            break;
+        }
+        
+        // Extract chunk size line and trim
+        std::string chunkSizeLine = rawBody.substr(pos, lineEnd - pos);
+        chunkSizeLine = Utils::trim(chunkSizeLine);
+        
+        // Remove potential \r
+        if (!chunkSizeLine.empty() && chunkSizeLine[chunkSizeLine.length() - 1] == '\r') {
+            chunkSizeLine = chunkSizeLine.substr(0, chunkSizeLine.length() - 1);
+        }
+        
+        // Parse chunk size (hexadecimal)
+        size_t semicolon = chunkSizeLine.find(';');
+        std::string hexStr = (semicolon == std::string::npos) ? chunkSizeLine : chunkSizeLine.substr(0, semicolon);
+        
+        char* endptr;
+        unsigned long chunkSize = strtoul(hexStr.c_str(), &endptr, 16);
+        if (endptr == hexStr.c_str()) {
+            // Invalid chunk size
+            break;
+        }
+        
+        // If chunk size is 0, we've reached the end
+        if (chunkSize == 0) {
+            Utils::logInfo("Chunked decoding complete: " + Utils::sizeToString(chunkNumber) + " chunks, " + Utils::sizeToString(decodedBody.length()) + " bytes total");
+            break;
+        }
+        
+        // Move to start of chunk data
+        pos = lineEnd + 1;
+        
+        // Make sure we have enough data
+        if (pos + chunkSize > rawBody.length()) {
+            break;
+        }
+        
+        // Extract chunk data
+        decodedBody += rawBody.substr(pos, chunkSize);
+        
+        // Move past chunk data and trailing CRLF
+        pos += chunkSize;
+        if (pos < rawBody.length() && rawBody[pos] == '\r') {
+            pos++;
+        }
+        if (pos < rawBody.length() && rawBody[pos] == '\n') {
+            pos++;
         }
     }
-    if (!_body.empty()) {
-        std::cout << "Body: " << _body << std::endl;
-    }
-    std::cout << "===================" << std::endl;
+    
+    return decodedBody;
+}
+
+void HttpRequest::clearBody() {
+    _body.clear();
 }

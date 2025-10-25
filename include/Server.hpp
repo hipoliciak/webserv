@@ -10,14 +10,57 @@
 
 class Server {
 private:
-    int _serverSocket;
-    struct sockaddr_in _serverAddr;
+    struct ServerInfo {
+        int socket;
+        struct sockaddr_in addr;
+        ServerConfig config;
+    };
+    
+    std::vector<ServerInfo> _servers;
     std::vector<struct pollfd> _pollFds;
     std::map<int, Client> _clients;
-    std::map<int, std::string> _pendingWrites; // fd -> response data to write
-    std::map<int, size_t> _writeOffsets; // fd -> offset in pending write data
+    std::map<int, std::string> _pendingWrites;
+    std::map<int, size_t> _writeOffsets;
+    std::map<int, ServerConfig> _serverConfigs; // Map socket fd to server config
+    std::map<int, int> _clientServerSockets; // Map client fd to server socket fd
     Config _config;
     bool _running;
+    
+    // Asynchronous CGI management
+    struct CgiProcess {
+        pid_t pid;
+        pid_t writerPid;
+        int outputFd;
+        int clientFd;
+        time_t startTime;
+        std::string output;
+        std::string tempFilePath;  // Track temp file for cleanup
+        ServerConfig serverConfig;
+    };
+    
+    struct CgiRequest {
+        int clientFd;
+        std::string scriptPath;
+        HttpRequest request;
+        ServerConfig serverConfig;
+        LocationConfig locationConfig;
+    };
+    
+    std::map<int, CgiProcess> _cgiProcesses; // Map output fd to CGI process info
+
+
+    
+    // CGI queuing system
+    struct QueuedCgiRequest {
+        int clientFd;
+        std::string scriptPath;
+        HttpRequest request;
+        ServerConfig serverConfig;
+        LocationConfig locationConfig;
+        std::string bodyFilePath; // Path to temporary file containing request body
+    };
+    std::vector<QueuedCgiRequest> _cgiQueue;
+    static const int MAX_CONCURRENT_CGI_PROCESSES = 5; // Increased for better performance
 
 public:
     Server();
@@ -30,10 +73,10 @@ public:
     void stop();
     
     // Socket operations
-    bool createSocket();
-    bool bindSocket();
-    bool listenSocket();
-    bool acceptNewConnection();
+    bool createSockets();
+    bool bindSockets();
+    bool listenSockets();
+    bool acceptNewConnection(int serverSocket);
     void handleClientRead(int clientFd);
     void handleClientWrite(int clientFd);
     void removeClient(int clientFd);
@@ -43,18 +86,26 @@ public:
     void queueResponse(int clientFd, const HttpResponse& response);
     HttpResponse handleGETRequest(const HttpRequest& request, const ServerConfig& serverConfig);
     HttpResponse handlePOSTRequest(const HttpRequest& request, const ServerConfig& serverConfig);
+    HttpResponse handlePUTRequest(const HttpRequest& request, const ServerConfig& serverConfig);
     HttpResponse handleDELETERequest(const HttpRequest& request, const ServerConfig& serverConfig);
     
     // File operations
     HttpResponse serveStaticFile(const std::string& path, const ServerConfig& serverConfig);
-    HttpResponse handleDirectoryRequest(const std::string& path, const ServerConfig& serverConfig);
-    HttpResponse generateDirectoryListing(const std::string& path, const std::string& urlPath);
+    HttpResponse handleDirectoryRequest(const std::string& path, const std::string& uri, const ServerConfig& serverConfig);
+    HttpResponse generateDirectoryListing(const std::string& path, const std::string& urlPath, const ServerConfig& serverConfig);
     
     // CGI handling
-    HttpResponse executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig);
+    HttpResponse executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig);
+    bool startAsyncCGI(int clientFd, const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig, const std::string& bodyFilePath = "");
+    void handleCgiCompletion(int cgiOutputFd);
+    void cleanupCgiProcess(int cgiOutputFd);
+    void processCgiQueue();
+    void queueCgiRequest(int clientFd, const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig);
     
     // Upload handling
     HttpResponse handleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig);
+    HttpResponse handleSimpleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& location);
+    HttpResponse handleJSONPost(const HttpRequest& request, const ServerConfig& serverConfig);
     bool saveUploadedFile(const std::string& filename, const std::string& content, const std::string& uploadPath);
     
     // Route handling
@@ -65,6 +116,9 @@ public:
     // Redirection
     HttpResponse handleRedirection(const LocationConfig& location);
     
+    // Error handling
+    HttpResponse createErrorResponse(int statusCode, const ServerConfig& serverConfig);
+    
     // Getters
     int getPort() const;
     const std::string& getHost() const;
@@ -73,7 +127,13 @@ public:
 private:
     void updatePollEvents(int clientFd);
     bool writeToClient(int clientFd);
-    ServerConfig getServerConfig(const HttpRequest& request) const;
+    ServerConfig getServerConfig(int clientFd) const;
+    
+    // Temporary file utilities for large body handling
+    std::string createTempFile();
+    bool writeBodyToFile(const std::string& body, const std::string& filePath);
+    std::string readBodyFromFile(const std::string& filePath);
+    void cleanupTempFile(const std::string& filePath);
 };
 
 #endif

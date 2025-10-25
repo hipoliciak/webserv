@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "Content-Type: text/html"
+echo "Content-Type: text/html; charset=utf-8"
 echo ""
 
 cat << 'EOF'
@@ -15,7 +15,7 @@ cat << 'EOF'
     </style>
 </head>
 <body>
-    <h1>🐚 Bash CGI Test</h1>
+    <h1>&#x1F41A; Bash CGI Test</h1>
     
     <div class="info">
         <h2>System Information</h2>
@@ -53,7 +53,7 @@ done
 cat << 'EOF'
     </div>
     
-    <p><a href="/">← Back to Home</a></p>
+    <p><a href="/">&larr; Back to Home</a></p>
 </body>
 </html>
 EOF
