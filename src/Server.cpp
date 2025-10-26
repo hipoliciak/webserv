@@ -4,6 +4,8 @@
 #include <fstream>
 #include <sstream>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <cstdio>
 
 Server::Server() : _running(false) {
     _config = Config();
@@ -172,7 +174,11 @@ void Server::run() {
             }
             
             if (_pollFds[i].revents & POLLOUT) {
+				if (_cgiWritePipes.find(fd) != _cgiWritePipes.end()) {
+                    handleCgiWrite(fd); // New function
+                } else {
                 handleClientWrite(fd);
+                }
             }
         }
     }
@@ -234,127 +240,71 @@ void Server::handleClientRead(int clientFd) {
         removeClient(clientFd);
         return;
     }
-    
-    if (!client.isRequestComplete() && client.areHeadersComplete()) {
-        std::string headers = client.getHeaders();
-        
-        size_t firstLineEnd = headers.find("\r\n");
-        if (firstLineEnd == std::string::npos) {
-            firstLineEnd = headers.find("\n");
-        }
-        
-        if (firstLineEnd != std::string::npos) {
-            std::string requestLine = headers.substr(0, firstLineEnd);
-            std::vector<std::string> tokens = Utils::split(requestLine, ' ');
-            
-            if (tokens.size() >= 2) {
-                std::string method = tokens[0];
-                std::string uri = tokens[1];
-                
-                if (method == "POST" || method == "PUT") {
-                    const ServerConfig& serverConfig = _config.getDefaultServer();
-                    LocationConfig location = _config.getLocationConfig(serverConfig, uri, method);
-                    
-                    // Use location-specific maxBodySize if set, otherwise use server default
-                    size_t maxBodySize = (location.maxBodySize > 0) ? location.maxBodySize : serverConfig.maxBodySize;
-                    
-                    std::string extension = Utils::getFileExtension(uri);
-                    if (extension == ".bla" && location.isRegex) {
-                        // For .bla files, use the larger CGI-friendly limit but still respect location limits
-                        maxBodySize = std::max(maxBodySize, static_cast<size_t>(100 * 1024 * 1024)); // 100MB for CGI
-                    }
-                    
-                    size_t clPos = headers.find("Content-Length:");
-                    if (clPos == std::string::npos) {
-                        clPos = headers.find("content-length:");
-                    }
-                    
-                    if (clPos != std::string::npos) {
-                        size_t lineEnd = headers.find("\r\n", clPos);
-                        if (lineEnd == std::string::npos) {
-                            lineEnd = headers.find("\n", clPos);
-                        }
-                        
-                        if (lineEnd != std::string::npos) {
-                            size_t colonPos = headers.find(":", clPos);
-                            if (colonPos != std::string::npos && colonPos < lineEnd) {
-                                std::string lengthStr = headers.substr(colonPos + 1, lineEnd - (colonPos + 1));
-                                lengthStr = Utils::trim(lengthStr);
-                                size_t contentLength = Utils::stringToInt(lengthStr);
-                                
-                                // Log large incoming requests
-                                if (contentLength > 1024 * 1024) {  // > 1MB
-                                    Utils::logInfo("Large POST request incoming for client " + Utils::intToString(clientFd) + 
-                                                  ", Content-Length: " + Utils::sizeToString(contentLength) + " bytes");
-                                }
-                                
-                                if (contentLength > maxBodySize) {
-                                    Utils::logError("Content-Length " + Utils::sizeToString(contentLength) + 
-                                                   " exceeds limit " + Utils::sizeToString(maxBodySize));
-                                    
-                                    client.stopReading();
-                                    HttpResponse response = createErrorResponse(413, serverConfig);
-                                    queueResponse(clientFd, response);
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    
-                    size_t tePos = headers.find("Transfer-Encoding:");
-                    if (tePos == std::string::npos) {
-                        tePos = headers.find("transfer-encoding:");
-                    }
-                    
-                    if (tePos != std::string::npos) {
-                        size_t lineEnd = headers.find("\r\n", tePos);
-                        if (lineEnd == std::string::npos) {
-                            lineEnd = headers.find("\n", tePos);
-                        }
-                        
-                        if (lineEnd != std::string::npos) {
-                            size_t colonPos = headers.find(":", tePos);
-                            if (colonPos != std::string::npos && colonPos < lineEnd) {
-                                std::string teValue = headers.substr(colonPos + 1, lineEnd - (colonPos + 1));
-                                teValue = Utils::trim(teValue);
-                                std::string teValueLow = Utils::toLower(teValue);
-                                
-                                if (teValueLow.find("chunked") != std::string::npos) {
-                                    if (!client.hasLoggedChunkedEncoding()) {
-                                        Utils::logInfo("Chunked encoding detected for client " + Utils::intToString(clientFd) + 
-                                                      ", receiving data in chunks...");
-                                        client.setChunkedEncodingLogged();
-                                    }
-                                    size_t currentBufferSize = client.getBuffer().size();
-                                    
-                                    // Use the same location-aware body size limit as above
-                                    LocationConfig location = _config.getLocationConfig(serverConfig, uri, method);
-                                    size_t maxBodySize = (location.maxBodySize > 0) ? location.maxBodySize : serverConfig.maxBodySize;
-                                    
-                                    std::string extension = Utils::getFileExtension(uri);
-                                    if (extension == ".bla" && location.isRegex) {
-                                        maxBodySize = std::max(maxBodySize, static_cast<size_t>(100 * 1024 * 1024)); // 100MB for CGI
-                                    }
-                                    
-                                    if (currentBufferSize > maxBodySize + 1024) {
-                                        Utils::logError("Chunked request already exceeds buffer limit " + Utils::sizeToString(maxBodySize));
-                                        client.stopReading();
-                                        HttpResponse response = createErrorResponse(413, serverConfig);
-                                        queueResponse(clientFd, response);
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    if (client.isRequestComplete()) {
+
+	if (client.getState() == Client::STATE_HEADERS_COMPLETE) {
+		// Headers are parsed, but we haven't started reading the body.
+		// This is our chance to check maxBodySize.
+
+		// Get config
+		ServerConfig serverConfig = getServerConfig(clientFd);
+		HttpRequest tempRequest(client.getRequest(), ""); // Parse headers
+		if (!tempRequest.isValid()) {
+			HttpResponse response = createErrorResponse(400, serverConfig);
+			queueResponse(clientFd, response);
+			return;
+		}
+		LocationConfig location = _config.getLocationConfig(serverConfig, tempRequest.getUri(), tempRequest.getMethod());
+
+		// Use location-specific maxBodySize if set, otherwise use server default
+		size_t maxBodySize = (location.maxBodySize > 0) ? location.maxBodySize : serverConfig.maxBodySize;
+
+		std::string extension = Utils::getFileExtension(tempRequest.getUri());
+		if (extension == ".bla") {
+				// For .bla files, check if any .bla regex CGI handler exists
+				for (size_t i = 0; i < serverConfig.locations.size(); ++i) {
+					const LocationConfig& regexLoc = serverConfig.locations[i];
+					if (regexLoc.isRegex && !regexLoc.cgiPath.empty() && regexLoc.path.find(".bla") != std::string::npos) {
+						// Found one, so apply the larger limit
+						// maxBodySize = std::max(maxBodySize, static_cast<size_t>(100 * 1024 * 1024));
+						// Utils::logInfo("Found .bla regex config, increasing maxBodySize to 100MB");
+						break;
+					}
+				}
+			}
+
+		if (client.isChunked()) {
+			Utils::logInfo("Chunked encoding detected. Setting max body size to " + Utils::sizeToString(maxBodySize));
+		} else if (client.getContentLength() > 0) {
+			Utils::logInfo("Content-Length detected. Setting max body size to " + Utils::sizeToString(maxBodySize));
+		}
+
+		// Tell the client to start reading the body
+		client.beginReadingBody(maxBodySize);
+
+		// Call readData() again to process any body data already in the buffer
+		if (!client.readData()) {
+			removeClient(clientFd);
+			return;
+		}
+	}
+
+	if (client.isRequestComplete()) {
+		if (client.shouldStopReading()) {
+			// This was set by the client's internal maxBodySize check
+			Utils::logError("Request body exceeded max size during streaming. Queuing 413 and closing connection.");
+			ServerConfig serverConfig = getServerConfig(clientFd);
+			HttpResponse response = createErrorResponse(413, serverConfig);
+			// Ensure Connection: close header for 413
+			response.setHeader("Connection", "close"); 
+			queueResponse(clientFd, response);
+			client.markForCloseAfterWrite(); // Tell server to close after sending 413
+			// DO NOT call client.clearRequest() here
+			return; // Stop processing this client for reads
+		}
         Utils::logInfo("Request complete for client " + Utils::intToString(clientFd) + ", processing...");
-        processHttpRequest(clientFd, client.getRequest());
+        
+        processHttpRequest(clientFd, client.getRequest(), client.getBodyFilePath());
+        
         client.clearRequest();
     }
 }
@@ -365,9 +315,9 @@ void Server::handleClientWrite(int clientFd) {
     }
 }
 
-void Server::processHttpRequest(int clientFd, const std::string& request) {
-    HttpRequest httpRequest(request);
-    HttpResponse response;
+void Server::processHttpRequest(int clientFd, const std::string& headers, const std::string& bodyFilePath) {
+    HttpRequest httpRequest(headers, bodyFilePath);
+	HttpResponse response;
     
     if (!httpRequest.isValid()) {
         ServerConfig serverConfig = getServerConfig(clientFd);
@@ -380,25 +330,47 @@ void Server::processHttpRequest(int clientFd, const std::string& request) {
         if (!isMethodAllowed(httpRequest.getMethod(), serverConfig, locationConfig)) {
             response = createErrorResponse(HTTP_METHOD_NOT_ALLOWED, serverConfig);
         } else {
-            if (httpRequest.getMethod() == "GET") {
+			if (httpRequest.getMethod() == "GET" || httpRequest.getMethod() == "HEAD") {
                 response = handleGETRequest(httpRequest, serverConfig);
+                if (httpRequest.getMethod() == "HEAD") {
+                    response.setBody("");
+                }
             } else if (httpRequest.getMethod() == "POST") {
                 // Check if this should use async CGI
                 std::string filePath = resolveFilePath(httpRequest.getUri(), serverConfig);
                 std::string extension = Utils::getFileExtension(filePath);
                 
-                if ((extension == ".bla" || httpRequest.getBody().size() > 1024 * 1024) && 
+                if ((extension == ".bla" || !httpRequest.getBodyFilePath().empty()) &&
                     (extension == ".php" || extension == ".py" || extension == ".sh" || extension == ".bla")) {
                     
                     LocationConfig location = _config.getLocationConfig(serverConfig, httpRequest.getUri(), httpRequest.getMethod());
                     bool canExecuteCGI = Utils::fileExists(filePath) || (location.isRegex && !location.cgiPath.empty());
-                    
+
+					if (extension == ".bla") {
+                        // For .bla files, ALWAYS find the regex location.
+                        bool foundRegex = false;
+                        for (size_t i = 0; i < serverConfig.locations.size(); ++i) {
+                            const LocationConfig& regexLoc = serverConfig.locations[i];
+                            if (regexLoc.isRegex && !regexLoc.cgiPath.empty() && regexLoc.path.find(".bla") != std::string::npos) {
+                                location = regexLoc;
+                                canExecuteCGI = true;
+                                foundRegex = true;
+                                // Utils::logInfo("Found regex CGI match for .bla: " + location.path);
+                                break;
+                            }
+                        }
+                        if (!foundRegex) {
+                             Utils::logError("Request for .bla file but no regex CGI handler found.");
+                             canExecuteCGI = false; // Force a 404
+                        }
+                    }
+
                     if (canExecuteCGI) {
                         // Queue CGI request or start immediately if capacity allows
                         if (_cgiProcesses.size() < MAX_CONCURRENT_CGI_PROCESSES) {
-                            if (startAsyncCGI(clientFd, filePath, httpRequest, serverConfig, location, "")) {
-                                return; // Don't queue any response - async CGI will handle it
-                            }
+							if (startAsyncCGI(clientFd, filePath, httpRequest, serverConfig, location, httpRequest.getBodyFilePath())) {
+								return;
+							}
                         } else {
                             // Queue the request for later processing
                             queueCgiRequest(clientFd, filePath, httpRequest, serverConfig, location);
@@ -464,14 +436,27 @@ bool Server::writeToClient(int clientFd) {
     
     _writeOffsets[clientFd] += bytesSent;
     
-    if (_writeOffsets[clientFd] >= response.length()) {
-        _pendingWrites.erase(clientFd);
-        _writeOffsets.erase(clientFd);
-        updatePollEvents(clientFd);
-        // Keep connection open for HTTP/1.1 keep-alive
-        return true;
-    }
-    
+	if (_writeOffsets[clientFd] >= response.length()) {
+    	// Write complete
+    	bool shouldClose = false;
+		if (_clients.count(clientFd)) { // Check if client still exists
+			shouldClose = _clients[clientFd].shouldCloseAfterWrite();
+		}
+
+		_pendingWrites.erase(clientFd);
+		_writeOffsets.erase(clientFd);
+
+		if (shouldClose) {
+			Utils::logInfo("Closing connection for client " + Utils::intToString(clientFd) + " after error response.");
+			removeClient(clientFd); 
+			return false; // Indicate client was removed
+		} else {
+			// Normal keep-alive: update poll events and wait for next request
+			updatePollEvents(clientFd);
+			return true;
+		}
+	}
+
     return true;
 }
 
@@ -531,7 +516,8 @@ HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerCo
     if (extension == ".php" || extension == ".py" || extension == ".sh") {
         if (Utils::fileExists(filePath)) {
             LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
-            return executeCGI(filePath, request, serverConfig, location);
+            // return executeCGI(filePath, request, serverConfig, location);
+			return executeCGI(filePath, request, serverConfig, location, "");
         } else {
             return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
         }
@@ -552,15 +538,19 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     // Validate body size against location-specific limits
     LocationConfig bodyCheckLocation = _config.getLocationConfig(serverConfig, request.getUri(), request.getMethod());
     size_t maxBodySize = (bodyCheckLocation.maxBodySize > 0) ? bodyCheckLocation.maxBodySize : serverConfig.maxBodySize;
-    
-    std::string body = request.getBody();
-    if (body.size() > maxBodySize) {
-        Utils::logError("POST body size " + Utils::sizeToString(body.size()) + 
-                       " exceeds limit " + Utils::sizeToString(maxBodySize) + 
-                       " for location " + bodyCheckLocation.path);
-        return createErrorResponse(413, serverConfig);
+
+	if (!request.getBodyFilePath().empty()) {
+        struct stat st;
+        if (stat(request.getBodyFilePath().c_str(), &st) == 0) {
+            if (st.st_size > static_cast<long>(maxBodySize)) {
+                Utils::logError("POST body file size " + Utils::sizeToString(st.st_size) + 
+                               " exceeds limit " + Utils::sizeToString(maxBodySize) + 
+                               " for location " + bodyCheckLocation.path);
+                return createErrorResponse(413, serverConfig);
+            }
+        }
     }
-    
+
     std::string contentType = request.getHeader("Content-Type");
     
     // Check if it's a file upload
@@ -572,44 +562,35 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     std::string filePath = resolveFilePath(request.getUri(), serverConfig);
     std::string extension = Utils::getFileExtension(filePath);
     Utils::logInfo("POST request to: " + request.getUri() + ", filePath: " + filePath + ", extension: " + extension);
-    
-    if (extension == ".php" || extension == ".py" || extension == ".sh" || extension == ".bla") {
+
+	if (extension == ".php" || extension == ".py" || extension == ".sh" || extension == ".bla") {
         LocationConfig location = _config.getLocationConfig(serverConfig, request.getUri(), request.getMethod());
-        Utils::logInfo("Location found - path: " + location.path + ", isRegex: " + std::string(location.isRegex ? "true" : "false") + ", cgiPath: " + location.cgiPath);
         
-        // For regex locations with CGI, execute even if file doesn't exist
         bool canExecuteCGI = Utils::fileExists(filePath) || (location.isRegex && !location.cgiPath.empty());
-        Utils::logInfo("File exists: " + std::string(Utils::fileExists(filePath) ? "true" : "false") + ", canExecuteCGI: " + std::string(canExecuteCGI ? "true" : "false"));
-        
-        if (canExecuteCGI) {
-            
-            // For CGI execution, also check if there's a regex location that matches and has CGI config
-            if (location.cgiPath.empty()) {
-                // Check all locations for regex matches with CGI config
-                for (size_t i = 0; i < serverConfig.locations.size(); ++i) {
-                    const LocationConfig& regexLoc = serverConfig.locations[i];
-                    if (regexLoc.isRegex && !regexLoc.cgiPath.empty()) {
-                        // Check if this regex location matches
-                        if (regexLoc.path.find(".bla") != std::string::npos && Utils::endsWith(request.getUri(), ".bla")) {
-                            location.cgiPath = regexLoc.cgiPath;
-                            location.allowedMethods = regexLoc.allowedMethods;
-                            break;
-                        }
-                        if (regexLoc.path.find("/directory/") != std::string::npos && 
-                            regexLoc.path.find(".bla") != std::string::npos &&
-                            request.getUri().find("/directory/") != std::string::npos && 
-                            Utils::endsWith(request.getUri(), ".bla")) {
-                            location.cgiPath = regexLoc.cgiPath;
-                            location.allowedMethods = regexLoc.allowedMethods;
-                            break;
-                        }
-                    }
+
+        if (extension == ".bla") {
+            // For .bla files, ALWAYS find the regex location.
+            bool foundRegex = false;
+            for (size_t i = 0; i < serverConfig.locations.size(); ++i) {
+                const LocationConfig& regexLoc = serverConfig.locations[i];
+                if (regexLoc.isRegex && !regexLoc.cgiPath.empty() && regexLoc.path.find(".bla") != std::string::npos) {
+                    location = regexLoc;
+                    canExecuteCGI = true;
+                    foundRegex = true;
+                    // Utils::logInfo("Found regex CGI match for .bla: " + location.path);
+                    break;
                 }
             }
-            
+            if (!foundRegex) {
+                 Utils::logError("Request for .bla file but no regex CGI handler found.");
+                 canExecuteCGI = false; // Force a 404
+            }
+        }
 
-            return executeCGI(filePath, request, serverConfig, location);
+        if (canExecuteCGI) {
+            return executeCGI(filePath, request, serverConfig, location, request.getBodyFilePath());
         } else {
+            Utils::logError("No CGI handler found for " + request.getUri());
             return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
         }
     }
@@ -621,7 +602,7 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     
     // Check if this is a POST to an upload location
     LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
-    if (!location.uploadPath.empty()) {
+    if (!location.uploadPath.empty() && request.getUri().find("/post_body") == std::string::npos) {
         return handleSimpleFileUpload(request, serverConfig, location);
     }
     
@@ -640,12 +621,22 @@ HttpResponse Server::handlePUTRequest(const HttpRequest& request, const ServerCo
     if (filePath.find("..") != std::string::npos) {
         return createErrorResponse(HTTP_FORBIDDEN, serverConfig);
     }
-    
-    // Write the request body to the file
-    if (!Utils::writeFile(filePath, request.getBody())) {
+
+	std::ifstream srcFile(request.getBodyFilePath().c_str(), std::ios::binary);
+    if (!srcFile.is_open()) {
+        Utils::logError("PUT: Failed to open temp body file: " + request.getBodyFilePath());
         return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
-    
+    std::ofstream destFile(filePath.c_str(), std::ios::binary);
+    if (!destFile.is_open()) {
+        Utils::logError("PUT: Failed to open destination file: " + filePath);
+        srcFile.close();
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
+    }
+    destFile << srcFile.rdbuf();
+    srcFile.close();
+    destFile.close();
+
     Utils::logInfo("File uploaded via PUT: " + filePath);
     
     // Return 201 Created for successful PUT
@@ -817,7 +808,7 @@ HttpResponse Server::generateDirectoryListing(const std::string& path, const std
     return response;
 }
 
-HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig) {
+HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig, const std::string& bodyFilePath) {
     // For regex locations with CGI, we don't require the physical file to exist
     if (!Utils::fileExists(scriptPath) && !locationConfig.isRegex) {
         return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
@@ -878,7 +869,12 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         CGI cgi;
         cgi.setScriptPath(scriptPath);
         cgi.setInterpreter(interpreter);
-        cgi.setBody(request.getBody());
+        // cgi.setBody(request.getBody());
+		if (!bodyFilePath.empty()) {
+            cgi.setBodyFromFile(bodyFilePath);
+        } else {
+            cgi.setBody("");
+        }
         cgi.setupEnvironment(request, serverConfig.serverName, serverConfig.port);
         
         char** envArray = cgi.createEnvArray();
@@ -923,90 +919,37 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         fcntl(pipeFdIn[1], F_SETFL, flags | O_NONBLOCK);
         flags = fcntl(pipeFdOut[0], F_GETFL, 0);
         fcntl(pipeFdOut[0], F_SETFL, flags | O_NONBLOCK);
-        
-        // Send request body to CGI if POST
-        if (request.getMethod() == "POST" && !request.getBody().empty()) {
-            Utils::logInfo("Sending " + Utils::sizeToString(request.getBody().length()) + " bytes to CGI process");
-            
-            const std::string& body = request.getBody();
-            size_t bodySize = body.length();
-            
-            // Use select-based pipe writing for all payloads
-            size_t totalToWrite = bodySize;
-            size_t totalWritten = 0;
-            const char* data = body.c_str();
-            
-            // Fork a writer process to avoid blocking the main process
-            writerPid = fork();
-                if (writerPid == 0) {
-                    // Writer child process
-                    close(pipeFdOut[0]); // Don't need read pipe
-                    close(pipeFdOut[1]); // Don't need write pipe
-                    
-                    time_t startTime = time(NULL);
-                    const int TOTAL_TIMEOUT_SECONDS = 600; // 10 minutes for very large files
-                    
-                    while (totalWritten < totalToWrite) {
-                        if (time(NULL) - startTime > TOTAL_TIMEOUT_SECONDS) {
-                            Utils::logError("Writer process: timeout after " + Utils::sizeToString(TOTAL_TIMEOUT_SECONDS) + " seconds");
-                            exit(1);
+
+		if (request.getMethod() == "POST" && !bodyFilePath.empty()) {
+            std::ifstream bodyFile(bodyFilePath.c_str(), std::ios::binary);
+            if (bodyFile.is_open()) {
+                Utils::logInfo("Writing body from file to sync CGI: " + bodyFilePath);
+                char buffer[65536];
+                while (bodyFile.read(buffer, sizeof(buffer)) || bodyFile.gcount() > 0) {
+                    ssize_t bytesToWrite = bodyFile.gcount();
+                    ssize_t totalWritten = 0;
+                    while (totalWritten < bytesToWrite) {
+                        ssize_t written = write(pipeFdIn[1], buffer + totalWritten, bytesToWrite - totalWritten);
+                        if (written <= 0) {
+                            Utils::logError("Sync CGI write error: " + std::string(strerror(errno)));
+                            break; // Exit inner write loop
                         }
-                        
-                        fd_set writefds;
-                        FD_ZERO(&writefds);
-                        FD_SET(pipeFdIn[1], &writefds);
-                        
-                        struct timeval timeout;
-                        timeout.tv_sec = 1; // Shorter timeout for more responsive logging
-                        timeout.tv_usec = 0;
-                        
-                        int selectResult = select(pipeFdIn[1] + 1, NULL, &writefds, NULL, &timeout);
-                        if (selectResult < 0) {
-                            Utils::logError("Writer process: select failed: " + std::string(strerror(errno)));
-                            exit(1);
-                        } else if (selectResult == 0) {
-                            // Timeout, continue
-                            continue;
-                        }
-                        
-                        if (FD_ISSET(pipeFdIn[1], &writefds)) {
-                            size_t chunkSize = std::min(totalToWrite - totalWritten, static_cast<size_t>(8192)); // 8KB chunks
-                            ssize_t written = write(pipeFdIn[1], data + totalWritten, chunkSize);
-                            
-                            if (written > 0) {
-                                totalWritten += written;
-                            } else if (written == 0) {
-                                Utils::logError("Writer process: unexpected write() returned 0");
-                                exit(1);
-                            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                                Utils::logError("Writer process: write error: " + std::string(strerror(errno)));
-                                exit(1);
-                            }
-                        }
+                        totalWritten += written;
                     }
-                    
-                    Utils::logInfo("Writer process: completed writing " + Utils::sizeToString(totalWritten) + " bytes");
-                    exit(0);
-                } else if (writerPid > 0) {
-                    // Parent process - close write end and continue
-                    close(pipeFdIn[1]);
-                    // The writer process will handle writing to the CGI
-                } else {
-                    Utils::logError("Failed to fork writer process: " + std::string(strerror(errno)));
-                    // Fall back to direct writing
-                    ssize_t written = write(pipeFdIn[1], body.c_str(), std::min(bodySize, static_cast<size_t>(65536)));
-                    if (written > 0) {
-                        Utils::logInfo("Fallback: wrote " + Utils::sizeToString(written) + " bytes directly");
+                    if (totalWritten < bytesToWrite) {
+                        break; // Exit read loop
                     }
-                    close(pipeFdIn[1]);
                 }
+                bodyFile.close();
+            } else {
+                Utils::logError("Sync CGI: Failed to open body file: " + bodyFilePath);
             }
         }
-        close(pipeFdIn[1]);
-        
+        close(pipeFdIn[1]); // Close write end
+
         // Read CGI output with timeout
         std::string cgiOutput;
-        char buffer[65536]; // 64KB buffer for faster reading of large responses
+        char buffer[65536];
         ssize_t bytesRead;
         
         // Use select/poll for CGI output reading with timeout
@@ -1126,6 +1069,7 @@ HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest
         
         return response;
     }
+}
 
 HttpResponse Server::handleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig) {
     std::string contentType = request.getHeader("Content-Type");
@@ -1138,7 +1082,7 @@ HttpResponse Server::handleFileUpload(const HttpRequest& request, const ServerCo
     }
     
     boundary = "--" + contentType.substr(boundaryPos + 9);
-    const std::string& body = request.getBody();
+	std::string body = Utils::readFile(request.getBodyFilePath());
     
     // Parse multipart data
     std::vector<std::string> parts = Utils::split(body, boundary);
@@ -1220,7 +1164,14 @@ HttpResponse Server::handleFileUpload(const HttpRequest& request, const ServerCo
 
 HttpResponse Server::handleSimpleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& location) {
     // Check location-specific body size limit
-    size_t bodySize = request.getBody().length();
+    // size_t bodySize = request.getBody().length();
+	size_t bodySize = 0;
+    if (!request.getBodyFilePath().empty()) {
+        struct stat st;
+        if (stat(request.getBodyFilePath().c_str(), &st) == 0) {
+            bodySize = st.st_size;
+        }
+    }
     size_t maxBodySize = location.maxBodySize > 0 ? location.maxBodySize : serverConfig.maxBodySize;
     
     if (bodySize > maxBodySize) {
@@ -1285,7 +1236,7 @@ HttpResponse Server::handleSimpleFileUpload(const HttpRequest& request, const Se
     }
     
     // Save the file
-    if (saveUploadedFile(filename, request.getBody(), uploadPath)) {
+	if (saveUploadedFile(filename, request.getBodyFilePath(), uploadPath, true)) {
         Utils::logInfo("File uploaded successfully via simple POST: " + filename);
         
         HttpResponse response(201);
@@ -1296,6 +1247,7 @@ HttpResponse Server::handleSimpleFileUpload(const HttpRequest& request, const Se
         Utils::logError("Failed to save uploaded file: " + filename);
         return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
+	return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
 }
 
 bool Server::saveUploadedFile(const std::string& filename, const std::string& content, const std::string& uploadPath) {
@@ -1319,6 +1271,52 @@ bool Server::saveUploadedFile(const std::string& filename, const std::string& co
     }
     
     return Utils::writeFile(finalPath, content);
+}
+
+bool Server::saveUploadedFile(const std::string& filename, const std::string& srcFilePath, const std::string& uploadPath, bool isTempFile) {
+    // Sanitize filename
+    std::string sanitizedFilename = Utils::getBasename(filename);
+    std::string fullPath = uploadPath + sanitizedFilename;
+    
+    // Check if file already exists
+    std::string finalPath = fullPath;
+    int counter = 1;
+    while (Utils::fileExists(finalPath)) {
+        size_t dotPos = sanitizedFilename.find_last_of('.');
+        if (dotPos != std::string::npos) {
+            std::string baseName = sanitizedFilename.substr(0, dotPos);
+            std::string extension = sanitizedFilename.substr(dotPos);
+            finalPath = uploadPath + baseName + "_" + Utils::intToString(counter) + extension;
+        } else {
+            finalPath = uploadPath + sanitizedFilename + "_" + Utils::intToString(counter);
+        }
+        counter++;
+    }
+
+    if (isTempFile) {
+        // Try to rename (move) the temp file, which is very fast
+        if (std::rename(srcFilePath.c_str(), finalPath.c_str()) == 0) {
+            return true;
+        }
+        // If rename fails (e.g., different devices), fall back to copy
+    }
+    
+    // Fallback to copy
+    std::ifstream srcFile(srcFilePath.c_str(), std::ios::binary);
+    if (!srcFile.is_open()) {
+        Utils::logError("saveUploadedFile: Failed to open source file: " + srcFilePath);
+        return false;
+    }
+    std::ofstream destFile(finalPath.c_str(), std::ios::binary);
+    if (!destFile.is_open()) {
+        Utils::logError("saveUploadedFile: Failed to open destination file: " + finalPath);
+        srcFile.close();
+        return false;
+    }
+    destFile << srcFile.rdbuf();
+    srcFile.close();
+    destFile.close();
+    return true;
 }
 
 std::string Server::resolveFilePath(const std::string& uri, const ServerConfig& serverConfig) {
@@ -1392,8 +1390,9 @@ bool Server::isRunning() const {
 
 HttpResponse Server::handleJSONPost(const HttpRequest& request, const ServerConfig& serverConfig) {
     std::string uri = request.getUri();
-    std::string body = request.getBody();
-    
+
+	std::string body = Utils::readFile(request.getBodyFilePath());
+
     // Generate a filename based on current timestamp if posting to a directory
     std::string filePath;
     if (uri.empty() || uri[uri.length() - 1] == '/') {
@@ -1508,9 +1507,6 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
         return false;
     }
     
-    // Declare writer process ID for later use
-    pid_t writerPid = -1;
-    
     pid_t pid = fork();
     if (pid == -1) {
         Utils::logError("Failed to fork for CGI: " + std::string(strerror(errno)));
@@ -1537,13 +1533,13 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
         cgi.setScriptPath(scriptPath);
         cgi.setInterpreter(interpreter);
         
-        // Use temporary file if available, otherwise use request body
-        if (!bodyFilePath.empty()) {
+		if (!bodyFilePath.empty()) {
+            // This is now the ONLY way the child gets a body
             cgi.setBodyFromFile(bodyFilePath);
         } else {
-            cgi.setBody(request.getBody());
+            cgi.setBody(""); // No file, no body
         }
-        
+		
         cgi.setupEnvironment(request, serverConfig.serverName, serverConfig.port);
         
         char** envArray = cgi.createEnvArray();
@@ -1582,69 +1578,12 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
         // Make output pipe non-blocking
         int flags = fcntl(pipeFdOut[0], F_GETFL, 0);
         fcntl(pipeFdOut[0], F_SETFL, flags | O_NONBLOCK);
+
+		int cgiInputFd = pipeFdIn[1];
+        flags = fcntl(cgiInputFd, F_GETFL, 0);
+        fcntl(cgiInputFd, F_SETFL, flags | O_NONBLOCK);
         
-        // Send request body to CGI if POST
-        if (request.getMethod() == "POST" && (!request.getBody().empty() || !bodyFilePath.empty())) {
-            // Fork a writer process to avoid blocking
-            writerPid = fork();
-            if (writerPid == 0) {
-                // Writer child process
-                close(pipeFdOut[0]); // Don't need read pipe
-                
-                if (!bodyFilePath.empty()) {
-                    // Read from temp file and write to CGI
-                    std::ifstream file(bodyFilePath.c_str(), std::ios::binary);
-                    if (!file.is_open()) {
-                        Utils::logError("Failed to open temp file for CGI input: " + bodyFilePath);
-                        exit(1);
-                    }
-                    
-                    char buffer[8192];
-                    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-                        size_t bytesToWrite = file.gcount();
-                        size_t written = 0;
-                        
-                        while (written < bytesToWrite) {
-                            ssize_t result = write(pipeFdIn[1], buffer + written, bytesToWrite - written);
-                            if (result <= 0) {
-                                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                    usleep(1000); // Wait 1ms
-                                    continue;
-                                }
-                                exit(1);
-                            }
-                            written += result;
-                        }
-                    }
-                    file.close();
-                } else {
-                    // Write from memory body
-                    const std::string& body = request.getBody();
-                    size_t totalWritten = 0;
-                    const char* data = body.c_str();
-                    size_t totalToWrite = body.length();
-                    
-                    while (totalWritten < totalToWrite) {
-                        ssize_t written = write(pipeFdIn[1], data + totalWritten, totalToWrite - totalWritten);
-                        if (written <= 0) {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                usleep(1000); // Wait 1ms
-                                continue;
-                            }
-                            break;
-                        }
-                        totalWritten += written;
-                    }
-                }
-                close(pipeFdIn[1]);
-                exit(0);
-            } else if (writerPid < 0) {
-                Utils::logError("Failed to fork writer process");
-            }
-        }
-        close(pipeFdIn[1]); // Close input pipe after writer is done
-        
-        // Add CGI output pipe to poll monitoring
+        // Add CGI output pipe to poll monitoring (this part is the same)
         struct pollfd cgiPollFd;
         cgiPollFd.fd = pipeFdOut[0];
         cgiPollFd.events = POLLIN;
@@ -1654,15 +1593,42 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
         // Store CGI process information
         CgiProcess cgiProc;
         cgiProc.pid = pid;
-        cgiProc.writerPid = writerPid;
+        // cgiProc.writerPid = -1; // Removed
         cgiProc.outputFd = pipeFdOut[0];
         cgiProc.clientFd = clientFd;
         cgiProc.startTime = time(NULL);
-        cgiProc.output = "";
         cgiProc.serverConfig = serverConfig;
-        cgiProc.tempFilePath = bodyFilePath;
         
-        _cgiProcesses[pipeFdOut[0]] = cgiProc;
+        // Store new input pipe info
+        cgiProc.inputFd = cgiInputFd;
+
+		cgiProc.bodyFilePath = bodyFilePath;
+
+		if (request.getMethod() == "POST" && !cgiProc.bodyFilePath.empty()) {
+            cgiProc.bodyFile = new std::ifstream(cgiProc.bodyFilePath.c_str(), std::ios::binary);
+            if (cgiProc.bodyFile->is_open()) { // Use ->
+                // Add CGI *input* pipe to poll monitoring
+                struct pollfd cgiWritePollFd;
+                cgiWritePollFd.fd = cgiInputFd;
+                cgiWritePollFd.events = POLLOUT;
+                cgiWritePollFd.revents = 0;
+                _pollFds.push_back(cgiWritePollFd);
+                
+                _cgiProcesses[pipeFdOut[0]] = cgiProc; // This copy is fine now
+                _cgiWritePipes[cgiInputFd] = &_cgiProcesses[pipeFdOut[0]];
+
+            } else {
+                Utils::logError("Failed to open body file: " + cgiProc.bodyFilePath);
+                delete cgiProc.bodyFile; // Clean up memory
+                cgiProc.bodyFile = NULL;
+                close(cgiInputFd);
+                _cgiProcesses[pipeFdOut[0]] = cgiProc;
+            }
+        } else {
+            // No body to write, just close the input pipe
+            close(cgiInputFd);
+            _cgiProcesses[pipeFdOut[0]] = cgiProc;
+        }
 
         Utils::logInfo("Started async CGI process for client " + Utils::intToString(clientFd) +
                       " (active: " + Utils::intToString(_cgiProcesses.size()) +
@@ -1682,7 +1648,7 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
     // Handle CGI completion for client
     
     // Sequential read: Read all available data in a loop until EAGAIN or EOF
-    char buffer[65536]; // 64KB buffer for faster reading of large responses
+    char buffer[65536];
     ssize_t bytesRead;
     bool shouldFinish = false;
     
@@ -1718,12 +1684,6 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
         // Wait for CGI process to finish
         int status;
         waitpid(cgiProc.pid, &status, WNOHANG);
-        
-        // Wait for writer process if it exists
-        if (cgiProc.writerPid > 0) {
-            int writerStatus;
-            waitpid(cgiProc.writerPid, &writerStatus, WNOHANG);
-        }
         
         // Parse CGI output and send response
         HttpResponse response;
@@ -1793,8 +1753,10 @@ void Server::cleanupCgiProcess(int cgiOutputFd) {
     if (it == _cgiProcesses.end()) {
         return;
     }
-    
-    // Remove from poll monitoring
+
+	CgiProcess& cgiProc = it->second;
+
+    // Remove output pipe from poll monitoring
     for (std::vector<struct pollfd>::iterator pollIt = _pollFds.begin(); pollIt != _pollFds.end(); ++pollIt) {
         if (pollIt->fd == cgiOutputFd) {
             _pollFds.erase(pollIt);
@@ -1802,14 +1764,20 @@ void Server::cleanupCgiProcess(int cgiOutputFd) {
         }
     }
     
-    // Close pipe
+    // Close output pipe
     close(cgiOutputFd);
-    
-    // Clean up temp file if it exists
-    if (!it->second.tempFilePath.empty()) {
-        cleanupTempFile(it->second.tempFilePath);
+
+	if (cgiProc.bodyFile != NULL) {
+        cgiProc.bodyFile->close();
+        delete cgiProc.bodyFile;
+        cgiProc.bodyFile = NULL;
     }
     
+    // Clean up temp file
+    if (!it->second.bodyFilePath.empty()) {
+        cleanupTempFile(it->second.bodyFilePath);
+    }
+
     // Remove from CGI processes map
     _cgiProcesses.erase(it);
     
@@ -1829,26 +1797,10 @@ void Server::queueCgiRequest(int clientFd, const std::string& scriptPath,
     queuedRequest.scriptPath = scriptPath;
     queuedRequest.serverConfig = serverConfig;
     queuedRequest.locationConfig = locationConfig;
-    
-    // Copy the request
-    queuedRequest.request = request;
-    
-    // Write large body to temporary file
-    const std::string& body = request.getBody();
-    if (body.length() > 4096) { // Only use temp files for large bodies
-        queuedRequest.bodyFilePath = createTempFile();
-        if (writeBodyToFile(body, queuedRequest.bodyFilePath)) {
-            // Clear the body from the request copy to save memory
-            queuedRequest.request.clearBody();
-            Utils::logInfo("Large body (" + Utils::sizeToString(body.length()) + " bytes) written to temp file for client " + Utils::intToString(clientFd));
-        } else {
-            Utils::logError("Failed to write large body to temp file for client " + Utils::intToString(clientFd));
-            queuedRequest.bodyFilePath = ""; // Keep body in memory as fallback
-        }
-    } else {
-        queuedRequest.bodyFilePath = ""; // Small body - keep in memory
-    }
-    
+	queuedRequest.request = request;
+
+	queuedRequest.bodyFilePath = request.getBodyFilePath();
+
     _cgiQueue.push_back(queuedRequest);
     Utils::logInfo("Queued CGI request for client " + Utils::intToString(clientFd) + " (queue size: " + Utils::intToString(_cgiQueue.size()) + ")");
 }
@@ -1864,7 +1816,6 @@ void Server::processCgiQueue() {
                          queuedRequest.request, queuedRequest.serverConfig, 
                          queuedRequest.locationConfig, queuedRequest.bodyFilePath)) {
             // Successfully started - remove from queue
-            // Note: temp file cleanup now handled in cleanupCgiProcess()
             _cgiQueue.erase(_cgiQueue.begin());
         } else {
             // Failed to start - keep in queue and break to avoid infinite loop
@@ -1923,5 +1874,64 @@ void Server::cleanupTempFile(const std::string& filePath) {
         Utils::logInfo("Cleaned up temporary file: " + filePath);
     } else {
         Utils::logError("Failed to cleanup temporary file: " + filePath);
+    }
+}
+
+void Server::handleCgiWrite(int cgiInputFd) {
+    // Look up the CgiProcess using the input fd
+    std::map<int, CgiProcess*>::iterator it = _cgiWritePipes.find(cgiInputFd);
+    if (it == _cgiWritePipes.end()) return;
+    
+    CgiProcess* cgiProc = it->second;
+
+    if (!cgiProc->bodyFile || !cgiProc->bodyFile->is_open()) {
+        // Should not happen, but safeguard
+        cleanupCgiProcess(cgiProc->outputFd); // Cleanup all
+        return;
+    }
+
+    char readBuffer[65536];
+    cgiProc->bodyFile->read(readBuffer, sizeof(readBuffer));
+    ssize_t bytesRead = cgiProc->bodyFile->gcount();
+    
+    if (bytesRead > 0) {
+        ssize_t written = write(cgiInputFd, readBuffer, bytesRead);
+        
+        if (written < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Pipe is full. Rewind the file stream to re-read this chunk later.
+                cgiProc->bodyFile->seekg(-bytesRead, std::ios::cur);
+                return; // Wait for next POLLOUT
+            }
+            // Real error (e.g., CGI process crashed)
+            Utils::logError("CGI write error: " + std::string(strerror(errno)));
+            cleanupCgiProcess(cgiProc->outputFd);
+            return;
+        }
+        
+        if (written < bytesRead) {
+            // Partially wrote. Rewind file to re-read the unwritten part.
+            cgiProc->bodyFile->seekg(written - bytesRead, std::ios::cur);
+            return; // Wait for next POLLOUT
+        }
+    }
+    
+    // If we read 0 bytes, or we're at EOF, we are done writing.
+    if (bytesRead == 0 || cgiProc->bodyFile->eof()) {
+        // Done writing. Close file, pipe, and remove from poll.
+        cgiProc->bodyFile->close();
+        delete cgiProc->bodyFile;
+        cgiProc->bodyFile = NULL;
+
+        close(cgiInputFd);
+        _cgiWritePipes.erase(it); // Erase from map
+        
+        // Remove from _pollFds
+        for (std::vector<struct pollfd>::iterator pollIt = _pollFds.begin(); pollIt != _pollFds.end(); ++pollIt) {
+            if (pollIt->fd == cgiInputFd) {
+                _pollFds.erase(pollIt);
+                break;
+            }
+        }
     }
 }

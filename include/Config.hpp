@@ -20,45 +20,45 @@ struct ServerConfig {
 };
 
 class Config {
-private:
-    std::vector<ServerConfig> _servers;
-    std::string _configFile;
+	public:
+		Config();
+		Config(const std::string& configFile);
+		~Config();
 
-public:
-    Config();
-    Config(const std::string& configFile);
-    ~Config();
-
-    // Parsing
-    bool parse();
-    bool parseFile(const std::string& filename);
-    bool parseServerBlock(const std::string& block);
-    bool parseLocationBlock(const std::string& block, LocationConfig& location);
-    void setDefaults(ServerConfig& server);
-    void setLocationDefaults(LocationConfig& location) const;
-    
-    // Getters
-    const std::vector<ServerConfig>& getServers() const;
-    ServerConfig getDefaultServer() const;
-    ServerConfig getServerByPort(int port) const;
-    ServerConfig getServerByName(const std::string& serverName) const;
-    LocationConfig getLocationConfig(const ServerConfig& server, const std::string& path) const;
-    LocationConfig getLocationConfig(const ServerConfig& server, const std::string& path, const std::string& method) const;
-    
-    // Validation
-    bool validate() const;
-    bool isValidMethod(const std::string& method, const ServerConfig& server) const;
-    bool isValidMethod(const std::string& method, const LocationConfig& location) const;
-    
-    // CGI support
-    std::string getCGIInterpreter(const std::string& extension, const ServerConfig& server) const;
-    bool isCGIEnabled(const ServerConfig& server) const;
-    
-    // Utilities
-    static std::vector<std::string> split(const std::string& str, char delimiter);
-    static std::string trim(const std::string& str);
-    static std::string extractValue(const std::string& line);
-    static std::vector<std::string> extractValues(const std::string& line);
+		// Parsing
+		bool parse();
+		bool parseFile(const std::string& filename);
+		bool parseServerBlock(const std::string& block);
+		bool parseLocationBlock(const std::string& block, LocationConfig& location);
+		void setDefaults(ServerConfig& server);
+		void setLocationDefaults(LocationConfig& location) const;
+		
+		// Getters
+		const std::vector<ServerConfig>& getServers() const;
+		ServerConfig getDefaultServer() const;
+		ServerConfig getServerByPort(int port) const;
+		ServerConfig getServerByName(const std::string& serverName) const;
+		LocationConfig getLocationConfig(const ServerConfig& server, const std::string& path) const;
+		LocationConfig getLocationConfig(const ServerConfig& server, const std::string& path, const std::string& method) const;
+		
+		// Validation
+		bool validate() const;
+		bool isValidMethod(const std::string& method, const ServerConfig& server) const;
+		bool isValidMethod(const std::string& method, const LocationConfig& location) const;
+		
+		// CGI support
+		std::string getCGIInterpreter(const std::string& extension, const ServerConfig& server) const;
+		bool isCGIEnabled(const ServerConfig& server) const;
+		
+		// Utilities
+		static std::vector<std::string> split(const std::string& str, char delimiter);
+		static std::string trim(const std::string& str);
+		static std::string extractValue(const std::string& line);
+		static std::vector<std::string> extractValues(const std::string& line);
+	
+	private:
+		std::vector<ServerConfig> _servers;
+		std::string _configFile;
 };
 
 #endif

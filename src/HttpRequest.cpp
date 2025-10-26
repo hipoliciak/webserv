@@ -4,70 +4,115 @@
 HttpRequest::HttpRequest() : _isValid(false) {
 }
 
-HttpRequest::HttpRequest(const std::string& rawRequest) : _isValid(false) {
-    parse(rawRequest);
+HttpRequest::HttpRequest(const std::string& headers, const std::string& bodyFilePath) 
+    : _bodyFilePath(bodyFilePath), _isValid(false) 
+{
+    parse(headers, bodyFilePath);
 }
 
 HttpRequest::~HttpRequest() {
 }
 
-bool HttpRequest::parse(const std::string& rawRequest) {
-    if (rawRequest.empty()) {
+bool HttpRequest::parse(const std::string& headers, const std::string& bodyFilePath) {
+    _isValid = false; // Start as invalid
+    if (headers.empty()) {
         return false;
     }
-    
-    std::vector<std::string> lines = Utils::split(rawRequest, '\n');
-    if (lines.empty()) {
-        return false;
-    }
-    
-    // Parse request line (first line)
-    parseRequestLine(Utils::trim(lines[0]));
-    
-    // Parse headers
-    std::vector<std::string> headerLines;
-    size_t i = 1;
-    for (; i < lines.size(); ++i) {
-        std::string line = Utils::trim(lines[i]);
-        if (line.empty()) {
-            break; // End of headers
+
+	size_t reqLineStart = headers.find_first_not_of(" \t\r\n");
+        if (reqLineStart == std::string::npos) {
+            Utils::logError("Headers block contains only whitespace.");
+            return false; // Only whitespace found
         }
-        headerLines.push_back(line);
+
+	// Find the end of the *actual* request line, searching from reqLineStart
+    size_t firstLineEnd = headers.find("\r\n", reqLineStart);
+    size_t firstLineEndLen = 2;
+    if (firstLineEnd == std::string::npos) {
+        firstLineEnd = headers.find("\n", reqLineStart);
+        if (firstLineEnd == std::string::npos) {
+            Utils::logError("Could not find end of first request line after position " + Utils::sizeToString(reqLineStart));
+            return false; // No line ending found after the start
+        }
+        firstLineEndLen = 1;
     }
-    
-    parseHeaders(headerLines);
-    
-    // Parse body (everything after headers)
-    if (i < lines.size()) {
-        for (++i; i < lines.size(); ++i) {
-            _body += lines[i];
-            if (i < lines.size() - 1) {
-                _body += "\n";
+
+    // Extract the request line using the correct start and end
+    std::string firstLineRaw = headers.substr(reqLineStart, firstLineEnd - reqLineStart);
+    // Utils::logInfo("HttpRequest received raw first line: [" + firstLineRaw + "]");
+
+    parseRequestLine(Utils::trim(firstLineRaw));
+    if (_method.empty()) {
+        Utils::logError("Request line parsing failed.");
+        return false;
+    }
+
+    // Adjust headerStart to be after the first line's actual ending
+    size_t headerStart = firstLineEnd + firstLineEndLen;
+
+    std::vector<std::string> headerLines;
+    size_t currentPos = headerStart;
+
+    while (currentPos < headers.length()) {
+        size_t nextLineEnd = headers.find("\r\n", currentPos);
+        size_t nextLineEndLen = 2;
+        if (nextLineEnd == std::string::npos) {
+            nextLineEnd = headers.find("\n", currentPos);
+            if (nextLineEnd != std::string::npos) {
+                nextLineEndLen = 1;
+            } else {
+                // This means we reached the end of the headers string without finding \r\n\r\n or \n\n
+                // which shouldn't happen if Client::parseHeadersFromBuffer worked.
+                Utils::logError("Malformed headers: No final empty line found.");
+                break; 
             }
         }
+
+        // Extract the line content *before* the line ending
+        std::string line = Utils::trim(headers.substr(currentPos, nextLineEnd - currentPos));
+
+        if (line.empty()) {
+            // Found the empty line separating headers from body
+            break;
+        }
+
+        headerLines.push_back(line);
+        currentPos = nextLineEnd + nextLineEndLen;
     }
-    
-    // Check if Transfer-Encoding is chunked and decode if necessary
-    std::string transferEncoding = getHeader("transfer-encoding");
-    if (!transferEncoding.empty() && Utils::toLower(transferEncoding).find("chunked") != std::string::npos) {
-        size_t originalSize = _body.length();
-        _body = decodeChunkedBody(_body);
-        Utils::logInfo("Chunked decoding: " + Utils::sizeToString(originalSize) + " raw bytes -> " + Utils::sizeToString(_body.length()) + " decoded bytes");
-    }
-    
-    // Parse query string from URI
-    parseQueryString(_uri);
-    
+
+    parseHeaders(headerLines);
+
+    _bodyFilePath = bodyFilePath;
+    parseQueryString(_uri); // Make sure this happens after getting _uri
+
+    // Final validity check
     _isValid = !_method.empty() && !_uri.empty() && !_version.empty();
+    if (!_isValid) {
+        Utils::logError("Request deemed invalid after parsing.");
+    }
     return _isValid;
 }
 
 void HttpRequest::parseRequestLine(const std::string& line) {
     std::vector<std::string> parts = Utils::split(line, ' ');
-    if (parts.size() >= 3) {
-        _method = Utils::toUpper(parts[0]);
-        _uri = parts[1];
-        _version = parts[2];
+    // Filter out empty strings that might result from multiple spaces
+    std::vector<std::string> validParts;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (!parts[i].empty()) {
+            validParts.push_back(parts[i]);
+        }
+    }
+
+    if (validParts.size() >= 3) {
+        _method = Utils::toUpper(validParts[0]);
+        _uri = validParts[1];
+        _version = validParts[2]; // Take the first 3 valid parts
+    } else {
+        // Explicitly clear fields if parsing fails
+        _method.clear();
+        _uri.clear();
+        _version.clear();
+        Utils::logError("Failed to parse request line: '" + line + "'"); // Add logging
     }
 }
 
@@ -116,8 +161,8 @@ const std::string& HttpRequest::getVersion() const {
     return _version;
 }
 
-const std::string& HttpRequest::getBody() const {
-    return _body;
+const std::string& HttpRequest::getBodyFilePath() const {
+	return _bodyFilePath;
 }
 
 const std::map<std::string, std::string>& HttpRequest::getHeaders() const {
@@ -149,73 +194,4 @@ bool HttpRequest::hasHeader(const std::string& key) const {
 size_t HttpRequest::getContentLength() const {
     std::string contentLength = getHeader("content-length");
     return contentLength.empty() ? 0 : Utils::stringToInt(contentLength);
-}
-
-std::string HttpRequest::decodeChunkedBody(const std::string& rawBody) const {
-    std::string decodedBody;
-    size_t pos = 0;
-    size_t chunkNumber = 0;
-    
-    Utils::logInfo("Starting chunked body decoding, raw body size: " + Utils::sizeToString(rawBody.length()));
-    
-    while (pos < rawBody.length()) {
-        chunkNumber++;
-        // Find the end of the chunk size line
-        size_t lineEnd = rawBody.find('\n', pos);
-        if (lineEnd == std::string::npos) {
-            break;
-        }
-        
-        // Extract chunk size line and trim
-        std::string chunkSizeLine = rawBody.substr(pos, lineEnd - pos);
-        chunkSizeLine = Utils::trim(chunkSizeLine);
-        
-        // Remove potential \r
-        if (!chunkSizeLine.empty() && chunkSizeLine[chunkSizeLine.length() - 1] == '\r') {
-            chunkSizeLine = chunkSizeLine.substr(0, chunkSizeLine.length() - 1);
-        }
-        
-        // Parse chunk size (hexadecimal)
-        size_t semicolon = chunkSizeLine.find(';');
-        std::string hexStr = (semicolon == std::string::npos) ? chunkSizeLine : chunkSizeLine.substr(0, semicolon);
-        
-        char* endptr;
-        unsigned long chunkSize = strtoul(hexStr.c_str(), &endptr, 16);
-        if (endptr == hexStr.c_str()) {
-            // Invalid chunk size
-            break;
-        }
-        
-        // If chunk size is 0, we've reached the end
-        if (chunkSize == 0) {
-            Utils::logInfo("Chunked decoding complete: " + Utils::sizeToString(chunkNumber) + " chunks, " + Utils::sizeToString(decodedBody.length()) + " bytes total");
-            break;
-        }
-        
-        // Move to start of chunk data
-        pos = lineEnd + 1;
-        
-        // Make sure we have enough data
-        if (pos + chunkSize > rawBody.length()) {
-            break;
-        }
-        
-        // Extract chunk data
-        decodedBody += rawBody.substr(pos, chunkSize);
-        
-        // Move past chunk data and trailing CRLF
-        pos += chunkSize;
-        if (pos < rawBody.length() && rawBody[pos] == '\r') {
-            pos++;
-        }
-        if (pos < rawBody.length() && rawBody[pos] == '\n') {
-            pos++;
-        }
-    }
-    
-    return decodedBody;
-}
-
-void HttpRequest::clearBody() {
-    _body.clear();
 }

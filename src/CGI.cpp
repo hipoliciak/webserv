@@ -57,7 +57,7 @@ void CGI::setupEnvironment(const HttpRequest& request, const std::string& server
     _envVars["QUERY_STRING"] = request.getUri().find('?') != std::string::npos ? 
                               request.getUri().substr(request.getUri().find('?') + 1) : "";
     _envVars["CONTENT_TYPE"] = request.getHeader("content-type");
-    _envVars["CONTENT_LENGTH"] = Utils::sizeToString(request.getBody().length());
+	_envVars["CONTENT_LENGTH"] = Utils::sizeToString(_body.length());
     _envVars["SERVER_NAME"] = serverName;
     _envVars["SERVER_PORT"] = Utils::intToString(serverPort);
     _envVars["SERVER_PROTOCOL"] = request.getVersion();

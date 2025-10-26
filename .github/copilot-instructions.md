@@ -36,7 +36,7 @@ std::map<int, CgiProcess> _cgiProcesses;   // Async CGI state
 ```
 
 ### CGI Process Management
-Sequential CGI processing (MAX_CONCURRENT_CGI_PROCESSES = 1) with queuing:
+Sequential CGI processing with queuing:
 - POST bodies written to temp files for large requests
 - Environment variables set per CGI spec (REQUEST_METHOD, QUERY_STRING, etc.)
 - Child process cleanup via waitpid() on completion
