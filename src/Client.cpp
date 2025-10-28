@@ -3,7 +3,6 @@
 #include "../include/Utils.hpp"
 
 #include <cstdlib>
-#include <cerrno>
 #include <cstring>
 #include <climits>
 #include <unistd.h>
@@ -55,28 +54,35 @@ bool Client::readData() {
     char buffer[BUFFER_SIZE];
     ssize_t bytesRead = recv(_fd, buffer, BUFFER_SIZE - 1, 0);
 
-    if (bytesRead < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // No new data from socket, but try to parse what's already in buffer
-            if (!_requestComplete && !_buffer.empty()) {
-                _requestComplete = parseRequest();
-            }
+    if (bytesRead > 0) {
+        // Successfully read new data
+        buffer[bytesRead] = '\0';
+        _buffer.append(buffer, bytesRead);
+        updateActivity();
+
+        if (!_requestComplete) {
+            _requestComplete = parseRequest();
+        }
+
+        return true;
+    }
+    
+    // bytesRead <= 0: Either no data available or connection closed
+    // Before giving up, try to parse what's already in the buffer
+    // This handles the case where all data arrived in one packet
+    if (!_requestComplete && !_buffer.empty()) {
+        _requestComplete = parseRequest();
+        // If request is now complete, return success
+        if (_requestComplete) {
             return true;
         }
-        return false;
-    } else if (bytesRead == 0) {
-        return false;
     }
-
-    buffer[bytesRead] = '\0';
-    _buffer.append(buffer, bytesRead);
-    updateActivity();
-
-    if (!_requestComplete) {
-        _requestComplete = parseRequest();
-    }
-
-    return true;
+    
+    // If bytesRead == 0, connection was closed by peer
+    // If bytesRead < 0, it's an error (likely EAGAIN if non-blocking, but we can't check)
+    // Since poll() indicated ready, bytesRead < 0 shouldn't happen unless there's an error
+    // Return false to close the connection
+    return (bytesRead == 0) ? false : true;
 }
 
 bool Client::parseHeadersFromBuffer() {

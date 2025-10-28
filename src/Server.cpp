@@ -467,18 +467,9 @@ bool Server::writeToClient(int clientFd) {
     
     ssize_t bytesSent = send(clientFd, response.c_str() + offset, response.length() - offset, 0);
     
-    if (bytesSent < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // Socket not ready for writing, try again later
-            return true;
-        }
-        // Real error occurred
+    if (bytesSent <= 0) {
+        // Connection closed or error - poll() should have indicated socket is ready
         return false;
-    }
-    
-    if (bytesSent == 0) {
-        // No bytes sent, but not an error - try again later
-        return true;
     }
     
     _writeOffsets[clientFd] += bytesSent;
@@ -520,6 +511,15 @@ void Server::updatePollEvents(int clientFd) {
 }
 
 void Server::removeClient(int clientFd) {
+    // Clean up any temp file before removing the client
+    std::map<int, Client>::iterator clientIt = _clients.find(clientFd);
+    if (clientIt != _clients.end()) {
+        const std::string& bodyFilePath = clientIt->second.getBodyFilePath();
+        if (!bodyFilePath.empty()) {
+            cleanupTempFile(bodyFilePath);
+        }
+    }
+    
     for (std::vector<struct pollfd>::iterator it = _pollFds.begin(); it != _pollFds.end(); ++it) {
         if (it->fd == clientFd) {
             _pollFds.erase(it);
@@ -1427,12 +1427,11 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
     CgiProcess& cgiProc = it->second;
     // Handle CGI completion for client
     
-    // Sequential read: Read all available data in a loop until EAGAIN or EOF
+    // Sequential read: Read all available data in a loop until EOF or would block
     char buffer[65536];
     ssize_t bytesRead;
-    bool shouldFinish = false;
     
-    // Read all available data in one go to avoid returning to poll loop prematurely
+    // Read all available data - poll() indicated this fd is ready
     while ((bytesRead = read(cgiOutputFd, buffer, sizeof(buffer))) > 0) {
         cgiProc.output.append(buffer, bytesRead);
         
@@ -1442,21 +1441,14 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
         }
     }
     
-    if (bytesRead == 0) {
-        shouldFinish = true;
-    } else if (bytesRead < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // No more data available right now, continue in next poll cycle
-            // Continue in next poll cycle
-            return;
-        } else {
-            // Real error
-            Utils::logError("CGI read error: " + std::string(strerror(errno)));
-            shouldFinish = true;
-        }
-    }
+    // bytesRead == 0: EOF - CGI process closed the pipe
+    // bytesRead < 0: Either EAGAIN (would block) or real error
+    // Since we can't check errno, we handle both cases:
+    // - If it's EAGAIN, poll() will notify us again
+    // - If it's a real error and the process died, poll() will give POLLERR/POLLHUP
     
-    if (shouldFinish) {
+    if (bytesRead == 0) {
+        // EOF - CGI process finished writing
         // EOF - CGI process finished writing
         Utils::logInfo("CGI output complete for client " + Utils::intToString(cgiProc.clientFd) + 
                       ", total size: " + Utils::sizeToString(cgiProc.output.length()) + " bytes");
@@ -1516,15 +1508,6 @@ void Server::handleCgiCompletion(int cgiOutputFd) {
         
         // Clean up
         cleanupCgiProcess(cgiOutputFd);
-    } else {
-        // Error or EAGAIN
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            Utils::logError("Error reading CGI output: " + std::string(strerror(errno)));
-            HttpResponse response = createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, cgiProc.serverConfig);
-            queueResponse(cgiProc.clientFd, response);
-            cleanupCgiProcess(cgiOutputFd);
-        }
-        // For EAGAIN, just continue - will be called again when data is ready
     }
 }
 
@@ -1677,20 +1660,16 @@ void Server::handleCgiWrite(int cgiInputFd) {
     if (bytesRead > 0) {
         ssize_t written = write(cgiInputFd, readBuffer, bytesRead);
         
-        if (written < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Pipe is full. Rewind the file stream to re-read this chunk later.
-                cgiProc->bodyFile->seekg(-bytesRead, std::ios::cur);
-                return; // Wait for next POLLOUT
-            }
-            // Real error (e.g., CGI process crashed)
-            Utils::logError("CGI write error: " + std::string(strerror(errno)));
+        if (written <= 0) {
+            // Error or pipe closed - poll() said it was ready but write failed
+            Utils::logError("CGI write failed");
             cleanupCgiProcess(cgiProc->outputFd);
             return;
         }
         
         if (written < bytesRead) {
             // Partially wrote. Rewind file to re-read the unwritten part.
+            // This can happen if the pipe buffer is smaller than our read buffer
             cgiProc->bodyFile->seekg(written - bytesRead, std::ios::cur);
             return; // Wait for next POLLOUT
         }
