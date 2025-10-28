@@ -253,7 +253,7 @@ bool Config::parseLocationBlock(const std::string& block, LocationConfig& locati
         } else if (directive == "redirect") {
             if (tokens.size() >= 3) {
                 int code = Utils::stringToInt(tokens[1]);
-                location.redirections[code] = extractValue(trimmedLine.substr(trimmedLine.find(tokens[2])));
+                location.redirections[code] = tokens[2];
             }
         }
     }

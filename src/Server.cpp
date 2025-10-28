@@ -298,7 +298,13 @@ void Server::handleClientRead(int clientFd) {
 			response.setHeader("Connection", "close"); 
 			queueResponse(clientFd, response);
 			client.markForCloseAfterWrite(); // Tell server to close after sending 413
-			// DO NOT call client.clearRequest() here
+			
+			// Clean up the temporary body file if it exists
+			if (!client.getBodyFilePath().empty()) {
+				cleanupTempFile(client.getBodyFilePath());
+			}
+			
+			client.clearRequest(); // Clear the request state
 			return; // Stop processing this client for reads
 		}
         Utils::logInfo("Request complete for client " + Utils::intToString(clientFd) + ", processing...");
@@ -318,6 +324,7 @@ void Server::handleClientWrite(int clientFd) {
 void Server::processHttpRequest(int clientFd, const std::string& headers, const std::string& bodyFilePath) {
     HttpRequest httpRequest(headers, bodyFilePath);
 	HttpResponse response;
+    bool tempFileHandedToCGI = false; // Track if temp file ownership transferred to CGI
     
     if (!httpRequest.isValid()) {
         ServerConfig serverConfig = getServerConfig(clientFd);
@@ -327,10 +334,43 @@ void Server::processHttpRequest(int clientFd, const std::string& headers, const 
         
         LocationConfig locationConfig = _config.getLocationConfig(serverConfig, httpRequest.getUri(), httpRequest.getMethod());
         
+        // Check for redirections first
+        if (!locationConfig.redirections.empty()) {
+            response = handleRedirection(locationConfig);
+            queueResponse(clientFd, response);
+            // Clean up temp file before returning
+            if (!bodyFilePath.empty()) {
+                cleanupTempFile(bodyFilePath);
+            }
+            return;
+        }
+        
         if (!isMethodAllowed(httpRequest.getMethod(), serverConfig, locationConfig)) {
             response = createErrorResponse(HTTP_METHOD_NOT_ALLOWED, serverConfig);
         } else {
 			if (httpRequest.getMethod() == "GET" || httpRequest.getMethod() == "HEAD") {
+                // Check if this is a CGI request that should be handled asynchronously
+                std::string filePath = resolveFilePath(httpRequest.getUri(), serverConfig);
+                std::string extension = Utils::getFileExtension(filePath);
+                
+                if ((extension == ".php" || extension == ".py" || extension == ".sh") && Utils::fileExists(filePath)) {
+                    LocationConfig location = _config.getLocationConfig(serverConfig, httpRequest.getUri(), httpRequest.getMethod());
+                    
+                    // Use async CGI for GET requests too
+                    if (_cgiProcesses.size() < MAX_CONCURRENT_CGI_PROCESSES) {
+                        if (startAsyncCGI(clientFd, filePath, httpRequest, serverConfig, location, "")) {
+                            tempFileHandedToCGI = true;
+                            return; // CGI started, response will be sent when ready
+                        }
+                    } else {
+                        // Queue the CGI request
+                        queueCgiRequest(clientFd, filePath, httpRequest, serverConfig, location);
+                        tempFileHandedToCGI = true;
+                        return;
+                    }
+                }
+                
+                // Not a CGI request or async CGI failed, handle normally
                 response = handleGETRequest(httpRequest, serverConfig);
                 if (httpRequest.getMethod() == "HEAD") {
                     response.setBody("");
@@ -369,11 +409,13 @@ void Server::processHttpRequest(int clientFd, const std::string& headers, const 
                         // Queue CGI request or start immediately if capacity allows
                         if (_cgiProcesses.size() < MAX_CONCURRENT_CGI_PROCESSES) {
 							if (startAsyncCGI(clientFd, filePath, httpRequest, serverConfig, location, httpRequest.getBodyFilePath())) {
+								tempFileHandedToCGI = true;
 								return;
 							}
                         } else {
                             // Queue the request for later processing
                             queueCgiRequest(clientFd, filePath, httpRequest, serverConfig, location);
+                            tempFileHandedToCGI = true;
                             return; // Don't queue any response - will be handled when CGI slot becomes available
                         }
                     }
@@ -391,6 +433,11 @@ void Server::processHttpRequest(int clientFd, const std::string& headers, const 
     }
     
     queueResponse(clientFd, response);
+    
+    // Clean up temporary body file if not handed to CGI
+    if (!bodyFilePath.empty() && !tempFileHandedToCGI) {
+        cleanupTempFile(bodyFilePath);
+    }
 }
 
 void Server::queueResponse(int clientFd, const HttpResponse& response) {
@@ -512,16 +559,8 @@ void Server::stop() {
 HttpResponse Server::handleGETRequest(const HttpRequest& request, const ServerConfig& serverConfig) {
     std::string filePath = resolveFilePath(request.getUri(), serverConfig);
     
-    std::string extension = Utils::getFileExtension(filePath);
-    if (extension == ".php" || extension == ".py" || extension == ".sh") {
-        if (Utils::fileExists(filePath)) {
-            LocationConfig location = getMatchingLocation(request.getUri(), serverConfig);
-            // return executeCGI(filePath, request, serverConfig, location);
-			return executeCGI(filePath, request, serverConfig, location, "");
-        } else {
-            return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
-        }
-    }
+    // CGI requests should now be handled asynchronously before reaching here
+    // This function only handles static files and directories
     
     if (Utils::fileExists(filePath)) {
         if (Utils::isDirectory(filePath)) {
@@ -564,35 +603,10 @@ HttpResponse Server::handlePOSTRequest(const HttpRequest& request, const ServerC
     Utils::logInfo("POST request to: " + request.getUri() + ", filePath: " + filePath + ", extension: " + extension);
 
 	if (extension == ".php" || extension == ".py" || extension == ".sh" || extension == ".bla") {
-        LocationConfig location = _config.getLocationConfig(serverConfig, request.getUri(), request.getMethod());
-        
-        bool canExecuteCGI = Utils::fileExists(filePath) || (location.isRegex && !location.cgiPath.empty());
-
-        if (extension == ".bla") {
-            // For .bla files, ALWAYS find the regex location.
-            bool foundRegex = false;
-            for (size_t i = 0; i < serverConfig.locations.size(); ++i) {
-                const LocationConfig& regexLoc = serverConfig.locations[i];
-                if (regexLoc.isRegex && !regexLoc.cgiPath.empty() && regexLoc.path.find(".bla") != std::string::npos) {
-                    location = regexLoc;
-                    canExecuteCGI = true;
-                    foundRegex = true;
-                    // Utils::logInfo("Found regex CGI match for .bla: " + location.path);
-                    break;
-                }
-            }
-            if (!foundRegex) {
-                 Utils::logError("Request for .bla file but no regex CGI handler found.");
-                 canExecuteCGI = false; // Force a 404
-            }
-        }
-
-        if (canExecuteCGI) {
-            return executeCGI(filePath, request, serverConfig, location, request.getBodyFilePath());
-        } else {
-            Utils::logError("No CGI handler found for " + request.getUri());
-            return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
-        }
+        // CGI requests should now be handled asynchronously before reaching here
+        // If we got here, it means async CGI wasn't triggered (shouldn't happen normally)
+        Utils::logError("POST CGI request reached handlePOSTRequest - should be handled asynchronously");
+        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
     }
     
     // Handle JSON POST requests to create files
@@ -806,269 +820,6 @@ HttpResponse Server::generateDirectoryListing(const std::string& path, const std
     response.setContentType("text/html");
     response.setBody(html);
     return response;
-}
-
-HttpResponse Server::executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig, const std::string& bodyFilePath) {
-    // For regex locations with CGI, we don't require the physical file to exist
-    if (!Utils::fileExists(scriptPath) && !locationConfig.isRegex) {
-        return createErrorResponse(HTTP_NOT_FOUND, serverConfig);
-    }
-    
-    // Determine CGI interpreter/executable
-    std::string interpreter;
-    std::string extension = Utils::getFileExtension(scriptPath);
-    
-    // Check if this location has a specific CGI path configured
-
-    if (!locationConfig.cgiPath.empty()) {
-        interpreter = locationConfig.cgiPath;
-    } else if (extension == ".php") {
-        interpreter = "/usr/bin/php-cgi";
-    } else if (extension == ".py") {
-        interpreter = "/usr/bin/python3";
-    } else if (extension == ".sh") {
-        interpreter = "/bin/bash";
-    } else {
-        return createErrorResponse(HTTP_NOT_IMPLEMENTED, serverConfig);
-    }
-    
-    // Create pipes for communication
-    int pipeFdIn[2], pipeFdOut[2];
-    if (pipe(pipeFdIn) == -1 || pipe(pipeFdOut) == -1) {
-        Utils::logError("Failed to create pipes for CGI: " + std::string(strerror(errno)));
-        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
-    }
-    
-    // Declare writer process ID for later use
-    pid_t writerPid = -1;
-    
-    pid_t pid = fork();
-    if (pid == -1) {
-        Utils::logError("Failed to fork for CGI: " + std::string(strerror(errno)));
-        close(pipeFdIn[0]); close(pipeFdIn[1]);
-        close(pipeFdOut[0]); close(pipeFdOut[1]);
-        return createErrorResponse(HTTP_INTERNAL_SERVER_ERROR, serverConfig);
-    }
-    
-    if (pid == 0) {
-        // Child process - execute CGI
-        close(pipeFdIn[1]);  // Close write end of input pipe
-        close(pipeFdOut[0]); // Close read end of output pipe
-        
-        // Use pipe for stdin
-        dup2(pipeFdIn[0], STDIN_FILENO);
-        
-        // Redirect stdout only - let stderr go to parent's stderr
-        dup2(pipeFdOut[1], STDOUT_FILENO);
-        
-        // Close original pipe file descriptors
-        close(pipeFdIn[0]);
-        close(pipeFdOut[1]);
-        
-        // Set up CGI environment using the CGI class
-        CGI cgi;
-        cgi.setScriptPath(scriptPath);
-        cgi.setInterpreter(interpreter);
-        // cgi.setBody(request.getBody());
-		if (!bodyFilePath.empty()) {
-            cgi.setBodyFromFile(bodyFilePath);
-        } else {
-            cgi.setBody("");
-        }
-        cgi.setupEnvironment(request, serverConfig.serverName, serverConfig.port);
-        
-        char** envArray = cgi.createEnvArray();
-        if (!envArray) {
-            Utils::logError("Failed to create environment array for CGI");
-            return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
-        }
-        
-        std::string scriptDir = Utils::getDirectory(scriptPath);
-        std::string scriptName = Utils::getBasename(scriptPath);
-        if (!scriptDir.empty()) {
-            chdir(scriptDir.c_str());
-        }
-        
-        // Execute based on whether we have a custom CGI path or standard interpreter
-        if (!locationConfig.cgiPath.empty()) {
-            // Custom CGI executable (like ubuntu_cgi_tester)
-            char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptPath.c_str()), NULL };
-            execve(interpreter.c_str(), args, envArray);
-        } else if (extension == ".php") {
-            char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptPath.c_str()), NULL };
-            execve(interpreter.c_str(), args, envArray);
-        } else {
-            char* args[] = { const_cast<char*>(interpreter.c_str()), const_cast<char*>(scriptName.c_str()), NULL };
-            execve(interpreter.c_str(), args, envArray);
-        }
-        
-        // Clean up environment array if exec fails
-        cgi.freeEnvArray(envArray);
-        Utils::logError("exec failed: " + std::string(strerror(errno)));
-        exit(1);
-    } else {
-        // Parent process
-        close(pipeFdIn[0]);  // Close read end of input pipe
-        close(pipeFdOut[1]); // Close write end of output pipe
-        
-
-        
-        // Make pipes non-blocking
-        int flags;
-        flags = fcntl(pipeFdIn[1], F_GETFL, 0);
-        fcntl(pipeFdIn[1], F_SETFL, flags | O_NONBLOCK);
-        flags = fcntl(pipeFdOut[0], F_GETFL, 0);
-        fcntl(pipeFdOut[0], F_SETFL, flags | O_NONBLOCK);
-
-		if (request.getMethod() == "POST" && !bodyFilePath.empty()) {
-            std::ifstream bodyFile(bodyFilePath.c_str(), std::ios::binary);
-            if (bodyFile.is_open()) {
-                Utils::logInfo("Writing body from file to sync CGI: " + bodyFilePath);
-                char buffer[65536];
-                while (bodyFile.read(buffer, sizeof(buffer)) || bodyFile.gcount() > 0) {
-                    ssize_t bytesToWrite = bodyFile.gcount();
-                    ssize_t totalWritten = 0;
-                    while (totalWritten < bytesToWrite) {
-                        ssize_t written = write(pipeFdIn[1], buffer + totalWritten, bytesToWrite - totalWritten);
-                        if (written <= 0) {
-                            Utils::logError("Sync CGI write error: " + std::string(strerror(errno)));
-                            break; // Exit inner write loop
-                        }
-                        totalWritten += written;
-                    }
-                    if (totalWritten < bytesToWrite) {
-                        break; // Exit read loop
-                    }
-                }
-                bodyFile.close();
-            } else {
-                Utils::logError("Sync CGI: Failed to open body file: " + bodyFilePath);
-            }
-        }
-        close(pipeFdIn[1]); // Close write end
-
-        // Read CGI output with timeout
-        std::string cgiOutput;
-        char buffer[65536];
-        ssize_t bytesRead;
-        
-        // Use select/poll for CGI output reading with timeout
-        fd_set readfds;
-        struct timeval timeout;
-        timeout.tv_sec = 30;  // 30 second timeout
-        timeout.tv_usec = 0;
-        
-        while (true) {
-            FD_ZERO(&readfds);
-            FD_SET(pipeFdOut[0], &readfds);
-            
-            int selectResult = select(pipeFdOut[0] + 1, &readfds, NULL, NULL, &timeout);
-            if (selectResult < 0) {
-                Utils::logError("Select failed on CGI pipe: " + std::string(strerror(errno)));
-                break;
-            } else if (selectResult == 0) {
-                Utils::logError("CGI timeout after 30 seconds");
-                break;
-            }
-            
-            if (FD_ISSET(pipeFdOut[0], &readfds)) {
-                bytesRead = read(pipeFdOut[0], buffer, sizeof(buffer));
-                if (bytesRead < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        continue;
-                    }
-                    Utils::logError("Error reading from CGI pipe: " + std::string(strerror(errno)));
-                    break;
-                } else if (bytesRead == 0) {
-                    // End of data
-                    Utils::logInfo("CGI output complete, total size: " + Utils::sizeToString(cgiOutput.length()) + " bytes");
-                    break;
-                } else {
-                    cgiOutput.append(buffer, bytesRead);
-                }
-            }
-        }
-        close(pipeFdOut[0]);
-        
-        // Wait for child process
-        Utils::logInfo("Waiting for CGI process to finish");
-        int status;
-        waitpid(pid, &status, 0);
-        
-        // Also wait for writer process if it exists
-        if (writerPid > 0) {
-            int writerStatus;
-            waitpid(writerPid, &writerStatus, 0);
-            Utils::logInfo("Writer process finished with exit code: " + Utils::intToString(WEXITSTATUS(writerStatus)));
-        }
-        Utils::logInfo("CGI process finished with exit code: " + Utils::intToString(WEXITSTATUS(status)));
-        Utils::logInfo("CGI output size: " + Utils::sizeToString(cgiOutput.length()) + " bytes");
-        if (cgiOutput.length() < 200) { // Log small outputs completely
-            Utils::logInfo("CGI output content: [" + cgiOutput + "]");
-        } else {
-            Utils::logInfo("CGI output preview (first 100 chars): [" + cgiOutput.substr(0, 100) + "...]");
-        }
-        
-        if (WEXITSTATUS(status) != 0) {
-            Utils::logError("CGI script execution failed with exit code: " + Utils::intToString(WEXITSTATUS(status)));
-            Utils::logError("CGI output was: " + cgiOutput);
-            return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
-        }
-        
-        // Parse CGI output
-        HttpResponse response;
-        size_t headerEnd = cgiOutput.find("\r\n\r\n");
-        if (headerEnd == std::string::npos) {
-            headerEnd = cgiOutput.find("\n\n");
-            if (headerEnd != std::string::npos) {
-                headerEnd += 2;
-            }
-        } else {
-            headerEnd += 4;
-        }
-        
-        if (headerEnd != std::string::npos) {
-            std::string headers = cgiOutput.substr(0, headerEnd);
-            std::string body = cgiOutput.substr(headerEnd);
-            
-            // Parse headers
-            std::vector<std::string> headerLines = Utils::split(headers, '\n');
-            for (size_t i = 0; i < headerLines.size(); ++i) {
-                std::string line = Utils::trim(headerLines[i]);
-                if (line.empty()) continue;
-                
-                size_t colonPos = line.find(':');
-                if (colonPos != std::string::npos) {
-                    std::string key = Utils::trim(line.substr(0, colonPos));
-                    std::string value = Utils::trim(line.substr(colonPos + 1));
-                    
-                    if (Utils::toLower(key) == "content-type") {
-                        response.setContentType(value);
-                    } else if (Utils::toLower(key) == "status") {
-                        // Parse status code
-                        std::string statusCode = value.substr(0, 3);
-                        response.setStatus(Utils::stringToInt(statusCode));
-                    }
-                }
-            }
-            
-            response.setBody(body);
-        } else {
-            response.setBody(cgiOutput);
-        }
-        
-        if (response.getStatusCode() == 0) {
-            response.setStatus(HTTP_OK);
-        }
-        if (response.getHeader("Content-Type").empty()) {
-            response.setContentType("text/html");
-        }
-        
-        Utils::logInfo("CGI response status code: " + Utils::intToString(response.getStatusCode()));
-        Utils::logInfo("CGI response content-type: " + response.getHeader("Content-Type"));
-        
-        return response;
-    }
 }
 
 HttpResponse Server::handleFileUpload(const HttpRequest& request, const ServerConfig& serverConfig) {
@@ -1357,8 +1108,37 @@ bool Server::isMethodAllowed(const std::string& method, const ServerConfig& /* s
     return _config.isValidMethod(method, location);
 }
 
-HttpResponse Server::handleRedirection(const LocationConfig& /* location */) {
-    return HttpResponse::createErrorResponse(HTTP_NOT_IMPLEMENTED);
+HttpResponse Server::handleRedirection(const LocationConfig& location) {
+    // Check if location has redirections defined
+    if (location.redirections.empty()) {
+        return HttpResponse::createErrorResponse(HTTP_INTERNAL_SERVER_ERROR);
+    }
+    
+    // Get the first redirection (we typically use 301 or 302)
+    std::map<int, std::string>::const_iterator it = location.redirections.begin();
+    int redirectCode = it->first;
+    std::string redirectUrl = it->second;
+    
+    // Create appropriate redirect response based on status code
+    HttpResponse response(redirectCode);
+    response.setHeader("Location", redirectUrl);
+    
+    std::string redirectPage = "<!DOCTYPE html>\n"
+                              "<html>\n"
+                              "<head>\n"
+                              "    <title>" + Utils::intToString(redirectCode) + " " + HttpResponse::getStatusMessage(redirectCode) + "</title>\n"
+                              "    <meta http-equiv=\"refresh\" content=\"0; url=" + redirectUrl + "\">\n"
+                              "</head>\n"
+                              "<body>\n"
+                              "    <h1>" + HttpResponse::getStatusMessage(redirectCode) + "</h1>\n"
+                              "    <p>The document has moved <a href=\"" + redirectUrl + "\">here</a>.</p>\n"
+                              "</body>\n"
+                              "</html>\n";
+    
+    response.setContentType("text/html");
+    response.setBody(redirectPage);
+    
+    return response;
 }
 
 ServerConfig Server::getServerConfig(int clientFd) const {

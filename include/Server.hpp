@@ -42,7 +42,6 @@ class Server {
 		HttpResponse generateDirectoryListing(const std::string& path, const std::string& urlPath, const ServerConfig& serverConfig);
 		
 		// CGI handling
-		HttpResponse executeCGI(const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig, const std::string& bodyFilePath = "");
 		bool startAsyncCGI(int clientFd, const std::string& scriptPath, const HttpRequest& request, const ServerConfig& serverConfig, const LocationConfig& locationConfig, const std::string& bodyFilePath = "");
 		void handleCgiCompletion(int cgiOutputFd);
 		void cleanupCgiProcess(int cgiOutputFd);

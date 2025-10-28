@@ -56,7 +56,13 @@ bool Client::readData() {
     ssize_t bytesRead = recv(_fd, buffer, BUFFER_SIZE - 1, 0);
 
     if (bytesRead < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return true;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // No new data from socket, but try to parse what's already in buffer
+            if (!_requestComplete && !_buffer.empty()) {
+                _requestComplete = parseRequest();
+            }
+            return true;
+        }
         return false;
     } else if (bytesRead == 0) {
         return false;
@@ -93,7 +99,6 @@ bool Client::parseHeadersFromBuffer() {
     headerEndPos += headerEndLen;
     _headers = _buffer.substr(0, headerEndPos);
 
-    _request = _headers; // For getRequest() compatibility
 	// Utils::logInfo("Client extracted headers block:\n--- START ---\n" + _headers + "--- END ---");
     
     size_t expectPos = _headers.find("Expect:");
@@ -273,7 +278,6 @@ bool Client::parseRequest() {
 void Client::clearRequest() {
     _buffer.clear();
     _headers.clear();
-    _request.clear();
     _requestComplete = false;
     
     if (_bodyFile) {
@@ -283,6 +287,8 @@ void Client::clearRequest() {
         delete _bodyFile;
         _bodyFile = NULL;
     }
+    // Don't delete the temp file here - Server owns it after processHttpRequest is called
+    // The Server will clean it up via cleanupTempFile()
     if (!_bodyFilePath.empty()) {
         _bodyFilePath.clear();
     }
@@ -324,7 +330,7 @@ bool Client::isRequestComplete() const {
 
 // Returns HEADERS ONLY
 const std::string& Client::getRequest() const {
-    return _request;
+    return _headers;
 }
 
 // Returns path to body temp file

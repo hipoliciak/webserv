@@ -60,7 +60,6 @@ class Client {
 		size_t _bodyBytesReceived;
 		size_t _currentChunkSize;
 		bool _isChunked;
-		std::string _request;
 		bool _requestComplete;
 		bool _closeConnectionAfterWrite;
 		std::string createTempFile();

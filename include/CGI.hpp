@@ -21,10 +21,6 @@ class CGI {
 		char** createEnvArray() const;
 		void freeEnvArray(char** envArray) const;
 		
-		// Execution
-		std::string execute();
-		bool isCGIScript(const std::string& path) const;
-		
 		// Utilities
 		std::string getScriptDirectory() const;
 		bool isValidScript() const;
