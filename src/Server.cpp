@@ -7,11 +7,11 @@
 #include <sys/stat.h>
 #include <cstdio>
 
-Server::Server() : _running(false) {
+Server::Server() : _running(false), _lastTimeoutCheck(time(NULL)) {
     _config = Config();
 }
 
-Server::Server(const Config& config) : _config(config), _running(false) {
+Server::Server(const Config& config) : _config(config), _running(false), _lastTimeoutCheck(time(NULL)) {
 }
 
 Server::~Server() {
@@ -180,8 +180,16 @@ void Server::run() {
                 handleClientWrite(fd);
                 }
             }
-        }
-    }
+
+			// Periodically check for timeouts
+			time_t currentTime = time(NULL);
+			if (currentTime - _lastTimeoutCheck >= 5) { // Check every 5 seconds
+				checkClientTimeouts();
+				checkCgiTimeouts();
+				_lastTimeoutCheck = currentTime;
+			}
+		}
+	}
 }
 
 bool Server::acceptNewConnection(int serverSocket) {
@@ -1373,7 +1381,6 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
         // Store CGI process information
         CgiProcess cgiProc;
         cgiProc.pid = pid;
-        // cgiProc.writerPid = -1; // Removed
         cgiProc.outputFd = pipeFdOut[0];
         cgiProc.clientFd = clientFd;
         cgiProc.startTime = time(NULL);
@@ -1691,6 +1698,74 @@ void Server::handleCgiWrite(int cgiInputFd) {
                 _pollFds.erase(pollIt);
                 break;
             }
+        }
+    }
+}
+
+void Server::checkClientTimeouts() {
+    time_t currentTime = time(NULL);
+    
+    // Iterate safely, as removeClient will modify _clients
+    std::map<int, Client>::iterator it = _clients.begin();
+    while (it != _clients.end()) {
+        int clientFd = it->first;
+        Client& client = it->second;
+        
+        // Get the specific config for this client's server
+        ServerConfig config = getServerConfig(clientFd);
+        int timeout = config.keepAliveTimeout; 
+        
+        if (difftime(currentTime, client.getLastActivity()) > timeout) {
+            Utils::logInfo("Client " + Utils::intToString(clientFd) + 
+                          " timed out (idle for " + Utils::intToString(timeout) + 
+                          "s). Disconnecting.");
+            
+            // Get iterator to next element *before* erasing
+            std::map<int, Client>::iterator toRemove = it;
+            ++it;
+            removeClient(toRemove->first); // Just remove it.
+        } else {
+            ++it; // No timeout, check next client
+        }
+    }
+}
+
+void Server::checkCgiTimeouts() {
+    time_t currentTime = time(NULL);
+    
+    std::map<int, CgiProcess>::iterator it = _cgiProcesses.begin();
+    while (it != _cgiProcesses.end()) {
+        // int cgiOutputFd = it->first; // This line is removed
+        CgiProcess& cgiProc = it->second;
+        
+        int cgiTimeout = cgiProc.serverConfig.cgiTimeout;
+        
+        if (difftime(currentTime, cgiProc.startTime) > cgiTimeout) {
+            Utils::logError("CGI process (pid " + Utils::intToString(cgiProc.pid) + 
+                           ") for client " + Utils::intToString(cgiProc.clientFd) + 
+                           " timed out (" + Utils::intToString(cgiTimeout) + "s). Killing.");
+                           
+            // 1. Kill the hanging CGI process
+            kill(cgiProc.pid, SIGKILL);
+            waitpid(cgiProc.pid, NULL, 0); // Reap the zombie
+            
+            // 2. Send 504 Gateway Timeout to the client
+            HttpResponse response = createErrorResponse(504, cgiProc.serverConfig);
+            response.setHeader("Connection", "close");
+            queueResponse(cgiProc.clientFd, response);
+
+            // 3. Mark client for close (if it still exists)
+            if (_clients.count(cgiProc.clientFd)) {
+                _clients[cgiProc.clientFd].markForCloseAfterWrite();
+            }
+            
+            // 4. Clean up CGI resources (this erases `it` from _cgiProcesses)
+            // We must get the next iterator *before* calling this.
+            std::map<int, CgiProcess>::iterator toRemove = it;
+            ++it;
+            cleanupCgiProcess(toRemove->first); // Uses the key from the iterator directly
+        } else {
+            ++it; // No timeout, advance iterator
         }
     }
 }

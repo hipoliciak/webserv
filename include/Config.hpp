@@ -17,6 +17,8 @@ struct ServerConfig {
     std::string uploadPath;
     std::string cgiPath;
     std::map<std::string, std::string> cgiExtensions;
+	int keepAliveTimeout;
+    int cgiTimeout;
 };
 
 class Config {

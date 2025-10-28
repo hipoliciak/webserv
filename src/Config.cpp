@@ -192,9 +192,12 @@ bool Config::parseServerBlock(const std::string& block) {
             if (tokens.size() >= 3) {
                 config.cgiExtensions[tokens[1]] = extractValue(trimmedLine.substr(trimmedLine.find(tokens[2])));
             }
-        }
-    }
-    
+        } else if (directive == "keepalive_timeout") {
+			config.keepAliveTimeout = Utils::stringToInt(tokens[1]);
+		} else if (directive == "cgi_timeout") {
+			config.cgiTimeout = Utils::stringToInt(tokens[1]);
+		}
+	}
     _servers.push_back(config);
     return true;
 }
@@ -281,12 +284,16 @@ void Config::setDefaults(ServerConfig& server) {
     server.errorPages[404] = "www/error/404.html";
     server.errorPages[500] = "www/error/500.html";
     server.errorPages[502] = "www/error/502.html";
+	server.errorPages[504] = "www/error/504.html";
     
     // Default CGI interpreters
     server.cgiExtensions[".php"] = "/usr/bin/php-cgi";
     server.cgiExtensions[".py"] = "/usr/bin/python3";
     server.cgiExtensions[".pl"] = "/usr/bin/perl";
     server.cgiExtensions[".sh"] = "/bin/bash";
+
+	server.keepAliveTimeout = 60; // 60 seconds
+    server.cgiTimeout = 30;       // 30 seconds
 }
 
 void Config::setLocationDefaults(LocationConfig& location) const {

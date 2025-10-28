@@ -104,6 +104,8 @@ HttpResponse HttpResponse::createErrorResponse(int statusCode) {
         errorMessage = "The request method is not allowed for this resource.";
     } else if (statusCode == 500) {
         errorMessage = "An internal server error occurred.";
+    } else if (statusCode == 504) {
+		errorMessage = "The gateway timed out while processing the request.";
     } else {
         errorMessage = "An error occurred.";
     }
@@ -163,6 +165,7 @@ std::string HttpResponse::getStatusMessage(int code) {
         case 501: return "Not Implemented";
         case 502: return "Bad Gateway";
         case 503: return "Service Unavailable";
+		case 504: return "Gateway Timeout";
         default: return "Unknown";
     }
 }

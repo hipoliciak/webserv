@@ -87,17 +87,16 @@ class Server {
 		std::map<int, int> _clientServerSockets; // Map client fd to server socket fd
 		Config _config;
 		bool _running;
+		time_t _lastTimeoutCheck;
 		
 		// Asynchronous CGI management
 		struct CgiProcess {
 			pid_t pid;
-			// pid_t writerPid;
 			int inputFd;
 			int outputFd;
 			int clientFd;
 			time_t startTime;
 			std::string output;
-			// std::string tempFilePath;
 			std::string bodyFilePath;
 			std::ifstream* bodyFile;
 			ServerConfig serverConfig;
@@ -140,6 +139,9 @@ class Server {
 		bool writeBodyToFile(const std::string& body, const std::string& filePath);
 		std::string readBodyFromFile(const std::string& filePath);
 		void cleanupTempFile(const std::string& filePath);
+
+		void checkClientTimeouts();
+        void checkCgiTimeouts();
 };
 
 #endif
