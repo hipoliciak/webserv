@@ -143,27 +143,6 @@ HttpResponse HttpResponse::createFileResponse(const std::string& filePath) {
     return response;
 }
 
-HttpResponse HttpResponse::createRedirectResponse(const std::string& location) {
-    HttpResponse response(301);
-    response.setHeader("Location", location);
-    
-    std::string redirectPage = "<!DOCTYPE html>\n"
-                              "<html>\n"
-                              "<head>\n"
-                              "    <title>301 Moved Permanently</title>\n"
-                              "</head>\n"
-                              "<body>\n"
-                              "    <h1>Moved Permanently</h1>\n"
-                              "    <p>The document has moved <a href=\"" + location + "\">here</a>.</p>\n"
-                              "</body>\n"
-                              "</html>\n";
-    
-    response.setContentType("text/html");
-    response.setBody(redirectPage);
-    
-    return response;
-}
-
 std::string HttpResponse::getStatusMessage(int code) {
     switch (code) {
         case 200: return "OK";

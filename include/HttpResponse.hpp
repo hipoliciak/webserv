@@ -33,7 +33,6 @@ class HttpResponse {
 		// Common responses
 		static HttpResponse createErrorResponse(int statusCode);
 		static HttpResponse createFileResponse(const std::string& filePath);
-		static HttpResponse createRedirectResponse(const std::string& location);
 		
 		// Utilities
 		static std::string getStatusMessage(int code);
