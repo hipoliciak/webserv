@@ -48,7 +48,10 @@ int main(int argc, char **argv) {
         std::cout << "Server listening on " << server.getHost() << ":" << server.getPort() << std::endl;
         
         // Handle SIGINT for graceful shutdown
-        signal(SIGINT, signalHandler);
+		signal(SIGINT, signalHandler);
+		// Ignore SIGPIPE so that writing to closed pipes doesn't kill the process;
+		// we handle write errors explicitly in the server code.
+		signal(SIGPIPE, SIG_IGN);
         
         // Run the server
         server.run();

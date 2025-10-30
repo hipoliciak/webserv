@@ -114,7 +114,7 @@ class Server {
 		};
 		
 		std::map<int, CgiProcess> _cgiProcesses; // Map output fd to CGI process info
-		std::map<int, CgiProcess*> _cgiWritePipes; // Map input fd to CgiProcess
+		std::map<int, int> _cgiWritePipes; // Map input fd to cgi output fd (key in _cgiProcesses)
 
 		// CGI queuing system
 		struct QueuedCgiRequest {

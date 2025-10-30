@@ -1393,7 +1393,7 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
 
 		if (request.getMethod() == "POST" && !cgiProc.bodyFilePath.empty()) {
             cgiProc.bodyFile = new std::ifstream(cgiProc.bodyFilePath.c_str(), std::ios::binary);
-            if (cgiProc.bodyFile->is_open()) { // Use ->
+                if (cgiProc.bodyFile->is_open()) { // Use ->
                 // Add CGI *input* pipe to poll monitoring
                 struct pollfd cgiWritePollFd;
                 cgiWritePollFd.fd = cgiInputFd;
@@ -1402,7 +1402,7 @@ bool Server::startAsyncCGI(int clientFd, const std::string& scriptPath, const Ht
                 _pollFds.push_back(cgiWritePollFd);
                 
                 _cgiProcesses[pipeFdOut[0]] = cgiProc; // This copy is fine now
-                _cgiWritePipes[cgiInputFd] = &_cgiProcesses[pipeFdOut[0]];
+                _cgiWritePipes[cgiInputFd] = pipeFdOut[0];
 
             } else {
                 Utils::logError("Failed to open body file: " + cgiProc.bodyFilePath);
@@ -1561,6 +1561,33 @@ void Server::cleanupCgiProcess(int cgiOutputFd) {
         cleanupTempFile(bodyFilePathCopy);
     }
 
+    // Also remove any write-pipe entries that reference this CGI process
+    // (they store the output fd). Collect keys to remove first to avoid
+    // iterator invalidation while erasing.
+    std::vector<int> writePipesToRemove;
+    for (std::map<int, int>::iterator wpIt = _cgiWritePipes.begin(); wpIt != _cgiWritePipes.end(); ++wpIt) {
+        if (wpIt->second == cgiOutputFd) {
+            writePipesToRemove.push_back(wpIt->first);
+        }
+    }
+    for (size_t i = 0; i < writePipesToRemove.size(); ++i) {
+        int inputFd = writePipesToRemove[i];
+
+        // Close input fd
+        close(inputFd);
+
+        // Remove from pollfd list
+        for (std::vector<struct pollfd>::iterator pollIt = _pollFds.begin(); pollIt != _pollFds.end(); ++pollIt) {
+            if (pollIt->fd == inputFd) {
+                _pollFds.erase(pollIt);
+                break;
+            }
+        }
+
+        // Erase from write-pipe map
+        _cgiWritePipes.erase(inputFd);
+    }
+
     // Remove from CGI processes map
     _cgiProcesses.erase(it);
 
@@ -1661,50 +1688,65 @@ void Server::cleanupTempFile(const std::string& filePath) {
 }
 
 void Server::handleCgiWrite(int cgiInputFd) {
-    // Look up the CgiProcess using the input fd
-    std::map<int, CgiProcess*>::iterator it = _cgiWritePipes.find(cgiInputFd);
-    if (it == _cgiWritePipes.end()) return;
-    
-    CgiProcess* cgiProc = it->second;
+    // Look up the output fd associated with this input fd
+    std::map<int, int>::iterator wpIt = _cgiWritePipes.find(cgiInputFd);
+    if (wpIt == _cgiWritePipes.end()) return;
 
-    if (!cgiProc->bodyFile || !cgiProc->bodyFile->is_open()) {
-        // Should not happen, but safeguard
-        cleanupCgiProcess(cgiProc->outputFd); // Cleanup all
+    int cgiOutputFd = wpIt->second;
+    std::map<int, CgiProcess>::iterator procIt = _cgiProcesses.find(cgiOutputFd);
+    if (procIt == _cgiProcesses.end()) {
+        // No corresponding CGI process found (might have been cleaned up). Clean up mapping and pollfd.
+        close(cgiInputFd);
+        for (std::vector<struct pollfd>::iterator pollIt = _pollFds.begin(); pollIt != _pollFds.end(); ++pollIt) {
+            if (pollIt->fd == cgiInputFd) {
+                _pollFds.erase(pollIt);
+                break;
+            }
+        }
+        _cgiWritePipes.erase(wpIt);
+        return;
+    }
+
+    CgiProcess& cgiProc = procIt->second;
+
+    if (!cgiProc.bodyFile || !cgiProc.bodyFile->is_open()) {
+        // Should not happen, but safeguard: cleanup the CGI process
+        cleanupCgiProcess(cgiProc.outputFd);
         return;
     }
 
     char readBuffer[65536];
-    cgiProc->bodyFile->read(readBuffer, sizeof(readBuffer));
-    ssize_t bytesRead = cgiProc->bodyFile->gcount();
-    
+    cgiProc.bodyFile->read(readBuffer, sizeof(readBuffer));
+    ssize_t bytesRead = cgiProc.bodyFile->gcount();
+
     if (bytesRead > 0) {
         ssize_t written = write(cgiInputFd, readBuffer, bytesRead);
         
         if (written <= 0) {
             // Error or pipe closed - poll() said it was ready but write failed
             Utils::logError("CGI write failed");
-            cleanupCgiProcess(cgiProc->outputFd);
+            cleanupCgiProcess(cgiProc.outputFd);
             return;
         }
-        
+
         if (written < bytesRead) {
             // Partially wrote. Rewind file to re-read the unwritten part.
-            // This can happen if the pipe buffer is smaller than our read buffer
-            cgiProc->bodyFile->seekg(written - bytesRead, std::ios::cur);
+            cgiProc.bodyFile->seekg(written - bytesRead, std::ios::cur);
             return; // Wait for next POLLOUT
         }
     }
-    
+
     // If we read 0 bytes, or we're at EOF, we are done writing.
-    if (bytesRead == 0 || cgiProc->bodyFile->eof()) {
+    if (bytesRead == 0 || cgiProc.bodyFile->eof()) {
         // Done writing. Close file, pipe, and remove from poll.
-        cgiProc->bodyFile->close();
-        delete cgiProc->bodyFile;
-        cgiProc->bodyFile = NULL;
+        cgiProc.bodyFile->close();
+        delete cgiProc.bodyFile;
+        cgiProc.bodyFile = NULL;
 
         close(cgiInputFd);
-        _cgiWritePipes.erase(it); // Erase from map
-        
+        // Erase mapping for this input fd
+        _cgiWritePipes.erase(wpIt);
+
         // Remove from _pollFds
         for (std::vector<struct pollfd>::iterator pollIt = _pollFds.begin(); pollIt != _pollFds.end(); ++pollIt) {
             if (pollIt->fd == cgiInputFd) {
