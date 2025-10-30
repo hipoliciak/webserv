@@ -1524,7 +1524,11 @@ void Server::cleanupCgiProcess(int cgiOutputFd) {
         return;
     }
 
-	CgiProcess& cgiProc = it->second;
+    // Copy necessary data out before erasing the map entry to avoid
+    // referencing freed memory (Valgrind flagged an invalid read here).
+    CgiProcess cgiProcCopy = it->second; // make a copy
+    int clientFd = cgiProcCopy.clientFd;
+    std::string bodyFilePathCopy = cgiProcCopy.bodyFilePath;
 
     // Remove output pipe from poll monitoring
     for (std::vector<struct pollfd>::iterator pollIt = _pollFds.begin(); pollIt != _pollFds.end(); ++pollIt) {
@@ -1533,28 +1537,37 @@ void Server::cleanupCgiProcess(int cgiOutputFd) {
             break;
         }
     }
-    
+
     // Close output pipe
     close(cgiOutputFd);
 
-	if (cgiProc.bodyFile != NULL) {
-        cgiProc.bodyFile->close();
-        delete cgiProc.bodyFile;
-        cgiProc.bodyFile = NULL;
+    // Close and delete any open body file held by the copy's resources were
+    // already duplicated; the original object's bodyFile pointer must be
+    // cleaned up from the map element itself before erasing to avoid leaks.
+    if (cgiProcCopy.bodyFile != NULL) {
+        // The copy's bodyFile points to the same object as the original; if
+        // the original still owned it, we need to close & delete on the
+        // original element to avoid double-delete. To be safe, attempt to
+        // close/delete via the iterator target if present.
+        if (it->second.bodyFile != NULL) {
+            it->second.bodyFile->close();
+            delete it->second.bodyFile;
+            it->second.bodyFile = NULL;
+        }
     }
-    
-    // Clean up temp file
-    if (!it->second.bodyFilePath.empty()) {
-        cleanupTempFile(it->second.bodyFilePath);
+
+    // Clean up temp file (use the copied path)
+    if (!bodyFilePathCopy.empty()) {
+        cleanupTempFile(bodyFilePathCopy);
     }
 
     // Remove from CGI processes map
     _cgiProcesses.erase(it);
-    
-    Utils::logInfo("Cleaned up CGI process for client " + Utils::intToString(it->second.clientFd) + 
+
+    Utils::logInfo("Cleaned up CGI process for client " + Utils::intToString(clientFd) + 
                   " (active: " + Utils::intToString(_cgiProcesses.size()) + 
                   ", queued: " + Utils::intToString(_cgiQueue.size()) + ")");
-    
+
     // Process queue to start next CGI if available
     processCgiQueue();
 }
